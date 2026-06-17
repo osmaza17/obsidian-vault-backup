@@ -1,6 +1,3 @@
-# Ajustes locales del usuario (incluye la ruta de destino)
-data.json
-
 # Sistema
 .DS_Store
 node_modules/
