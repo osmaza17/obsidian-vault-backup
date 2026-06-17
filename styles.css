@@ -1,0 +1,14 @@
+/* Boton de copia de seguridad junto al conmutador de vault */
+.vault-backup-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 2px 4px;
+  vertical-align: middle;
+}
+
+.vault-backup-btn svg {
+  width: 16px;
+  height: 16px;
+}

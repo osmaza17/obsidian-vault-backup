@@ -1,0 +1,9 @@
+{
+  "id": "vault-backup",
+  "name": "Vault Backup",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Copia de seguridad del vault entero a una carpeta externa, manual o periodica. Crea una carpeta con formato 'DD MM YYYY - N' por cada copia.",
+  "author": "osmaza17",
+  "isDesktopOnly": true
+}
