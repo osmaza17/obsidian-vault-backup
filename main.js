@@ -49,6 +49,7 @@ class VaultBackupPlugin extends obsidian.Plugin {
     this.intervalId = null;
     this.bottomBtn = null;
     this.statusBtn = null;
+    this.progress = new BackupProgressPanel();
   }
 
   async onload() {
@@ -77,6 +78,7 @@ class VaultBackupPlugin extends obsidian.Plugin {
       this.bottomBtn.remove();
       this.bottomBtn = null;
     }
+    if (this.progress) this.progress.hide();
   }
 
   /* ----------------------- boton inferior ------------------------ */
@@ -223,11 +225,33 @@ class VaultBackupPlugin extends obsidian.Plugin {
 
   /* --------------------------- copia ----------------------------- */
 
+  // Cuenta los archivos que se van a copiar (sin leerlos), para poder
+  // mostrar el progreso. shouldSkip excluye rutas.
+  async countFiles(src, shouldSkip) {
+    let n = 0;
+    let entries;
+    try {
+      entries = await fsp.readdir(src, { withFileTypes: true });
+    } catch (e) {
+      return 0;
+    }
+    for (const ent of entries) {
+      const p = path.join(src, ent.name);
+      if (shouldSkip && shouldSkip(p)) continue;
+      if (ent.isDirectory()) {
+        n += await this.countFiles(p, shouldSkip);
+      } else if (ent.isFile() || ent.isSymbolicLink()) {
+        n++;
+      }
+    }
+    return n;
+  }
+
   // Copia recursiva de src a dest. shouldSkip(absPath) permite excluir
   // rutas (p.ej. la propia carpeta de destino si estuviera dentro del
-  // vault). Devuelve el numero de archivos copiados.
-  async copyDir(src, dest, shouldSkip) {
-    let count = 0;
+  // vault). ctx = { copied, onProgress } reporta el avance por archivo.
+  // Devuelve el numero de archivos copiados.
+  async copyDir(src, dest, shouldSkip, ctx) {
     await fsp.mkdir(dest, { recursive: true });
     const entries = await fsp.readdir(src, { withFileTypes: true });
     for (const ent of entries) {
@@ -235,22 +259,24 @@ class VaultBackupPlugin extends obsidian.Plugin {
       if (shouldSkip && shouldSkip(srcPath)) continue;
       const destPath = path.join(dest, ent.name);
       if (ent.isDirectory()) {
-        count += await this.copyDir(srcPath, destPath, shouldSkip);
+        await this.copyDir(srcPath, destPath, shouldSkip, ctx);
       } else if (ent.isSymbolicLink()) {
         // Copia el destino real del enlace como archivo normal.
         try {
           await fsp.copyFile(srcPath, destPath);
-          count++;
+          ctx.copied++;
+          if (ctx.onProgress) ctx.onProgress(ctx.copied, srcPath);
         } catch (e) {
           console.error("[vault-backup] no se pudo copiar el enlace:", srcPath, e);
         }
       } else if (ent.isFile()) {
         await fsp.copyFile(srcPath, destPath);
-        count++;
+        ctx.copied++;
+        if (ctx.onProgress) ctx.onProgress(ctx.copied, srcPath);
       }
       // Otros tipos (sockets, FIFOs...) se ignoran.
     }
-    return count;
+    return ctx.copied;
   }
 
   async runBackup(trigger) {
@@ -289,6 +315,7 @@ class VaultBackupPlugin extends obsidian.Plugin {
 
     this.isBackingUp = true;
     const started = Date.now();
+    const panel = this.progress;
     try {
       fs.mkdirSync(destRoot, { recursive: true });
 
@@ -296,26 +323,137 @@ class VaultBackupPlugin extends obsidian.Plugin {
       const vaultName = path.basename(basePath);
       const targetDir = path.join(destRoot, folderName, vaultName);
 
-      new obsidian.Notice(`Vault Backup: copiando a "${folderName}"...`);
-
       // Red de seguridad: nunca copiar dentro del propio destino.
       const skip = (absPath) => isInside(destRoot, absPath);
-      const count = await this.copyDir(basePath, targetDir, skip);
+
+      panel.show();
+      panel.setStatus(`Preparando copia "${folderName}"...`);
+      panel.setProgress(0, "");
+
+      const total = await this.countFiles(basePath, skip);
+      panel.setTotal(total);
+      panel.setStatus(`Copiando a "${folderName}"...`);
+
+      const ctx = {
+        copied: 0,
+        onProgress: (copied, srcPath) =>
+          panel.setProgress(copied, path.relative(basePath, srcPath)),
+      };
+      await this.copyDir(basePath, targetDir, skip, ctx);
 
       const secs = ((Date.now() - started) / 1000).toFixed(1);
-      new obsidian.Notice(
-        `Vault Backup: copia completada (${count} archivos, ${secs}s) -> ${folderName}`
-      );
+      panel.setDone(`Copia completada: ${ctx.copied} archivos en ${secs}s`);
       console.log(
-        `[vault-backup] copia "${folderName}" completada: ${count} archivos en ${secs}s`
+        `[vault-backup] copia "${folderName}" completada: ${ctx.copied} archivos en ${secs}s`
       );
     } catch (e) {
       console.error("[vault-backup] error en la copia:", e);
-      new obsidian.Notice(
-        `Vault Backup: error en la copia: ${e && e.message ? e.message : e}`
-      );
+      panel.setError(`Error: ${e && e.message ? e.message : e}`);
     } finally {
       this.isBackingUp = false;
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Panel de progreso flotante (esquina inferior izquierda)            */
+/* ------------------------------------------------------------------ */
+
+class BackupProgressPanel {
+  constructor() {
+    this.el = null;
+    this.statusEl = null;
+    this.barEl = null;
+    this.countEl = null;
+    this.fileEl = null;
+    this.total = 0;
+    this.lastPaint = 0;
+    this.hideTimer = null;
+  }
+
+  ensure() {
+    if (this.el && this.el.isConnected) return;
+    if (this.hideTimer) {
+      window.clearTimeout(this.hideTimer);
+      this.hideTimer = null;
+    }
+    const el = document.body.createDiv({ cls: "vault-backup-panel" });
+
+    const header = el.createDiv({ cls: "vault-backup-panel-header" });
+    header.createSpan({ cls: "vault-backup-panel-title", text: "Copia de seguridad" });
+    const close = header.createSpan({ cls: "vault-backup-panel-close", text: "×" });
+    close.setAttr("aria-label", "Cerrar");
+    close.addEventListener("click", () => this.hide());
+
+    this.statusEl = el.createDiv({ cls: "vault-backup-status", text: "" });
+
+    const barWrap = el.createDiv({ cls: "vault-backup-bar-wrap" });
+    this.barEl = barWrap.createDiv({ cls: "vault-backup-bar" });
+
+    this.countEl = el.createDiv({ cls: "vault-backup-count", text: "" });
+    this.fileEl = el.createDiv({ cls: "vault-backup-file", text: "" });
+
+    this.el = el;
+  }
+
+  show() {
+    this.ensure();
+    this.el.removeClass("vault-backup-done");
+    this.el.removeClass("vault-backup-error");
+  }
+
+  setStatus(text) {
+    if (this.statusEl) this.statusEl.setText(text);
+  }
+
+  setTotal(n) {
+    this.total = n || 0;
+  }
+
+  setProgress(copied, relPath) {
+    if (!this.el) return;
+    const now = Date.now();
+    // Limita los repintados para no saturar la UI.
+    if (now - this.lastPaint < 80) return;
+    this.lastPaint = now;
+    const pct = this.total > 0 ? Math.min(100, Math.round((copied / this.total) * 100)) : 0;
+    this.barEl.style.width = pct + "%";
+    this.countEl.setText(
+      this.total > 0 ? `${copied} / ${this.total} archivos (${pct}%)` : `${copied} archivos`
+    );
+    if (relPath) this.fileEl.setText(relPath);
+  }
+
+  setDone(text) {
+    this.ensure();
+    this.el.addClass("vault-backup-done");
+    this.barEl.style.width = "100%";
+    this.setStatus(text);
+    this.fileEl.setText("");
+    // Se oculta solo pasados unos segundos.
+    this.scheduleHide(6000);
+  }
+
+  setError(text) {
+    this.ensure();
+    this.el.addClass("vault-backup-error");
+    this.setStatus(text);
+    this.fileEl.setText("");
+  }
+
+  scheduleHide(ms) {
+    if (this.hideTimer) window.clearTimeout(this.hideTimer);
+    this.hideTimer = window.setTimeout(() => this.hide(), ms);
+  }
+
+  hide() {
+    if (this.hideTimer) {
+      window.clearTimeout(this.hideTimer);
+      this.hideTimer = null;
+    }
+    if (this.el) {
+      this.el.remove();
+      this.el = null;
     }
   }
 }

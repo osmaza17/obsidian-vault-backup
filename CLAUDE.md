@@ -21,11 +21,16 @@ es el numero de copia hecha ese mismo dia (empezando en 1).
 - `main.js` - todo el codigo del plugin.
   - `VaultBackupPlugin` - clase principal (`onload`/`onunload`, copia, horario).
     - `runBackup(trigger)` - ejecuta una copia (con guardas de validacion y solape).
-    - `copyDir(src, dest, shouldSkip)` - copia recursiva con `fs/promises`.
+    - `countFiles(src, shouldSkip)` - cuenta archivos para el progreso.
+    - `copyDir(src, dest, shouldSkip, ctx)` - copia recursiva con `fs/promises`
+      reportando el avance por archivo via `ctx.onProgress`.
     - `computeBackupFolderName(destPath)` - calcula la carpeta `DD MM YYYY - N`.
     - `applySchedule()` / `clearSchedule()` - intervalo de copia automatica.
     - `addBottomLeftButton()` / `findVaultSwitcher()` - inserta el boton junto al
       conmutador de vault ("Manage vaults") de la barra inferior izquierda.
+  - `BackupProgressPanel` - panel flotante no intrusivo en la esquina inferior
+    izquierda que muestra el progreso en vivo (estado, barra, recuento, archivo
+    actual) sin bloquear el uso de Obsidian.
   - `VaultBackupSettingTab` - pestana de ajustes (destino, automatico, intervalo).
 - `manifest.json` - metadatos del plugin.
 - `styles.css` - tamano del icono del boton.

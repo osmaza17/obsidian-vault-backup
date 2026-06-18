@@ -12,3 +12,91 @@
   width: 16px;
   height: 16px;
 }
+
+/* Panel de progreso flotante (esquina inferior izquierda) */
+.vault-backup-panel {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: var(--layer-notice, 100);
+  width: 320px;
+  max-width: calc(100vw - 32px);
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  font-size: var(--font-ui-small);
+}
+
+.vault-backup-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.vault-backup-panel-title {
+  font-weight: var(--font-semibold);
+}
+
+.vault-backup-panel-close {
+  cursor: pointer;
+  opacity: 0.6;
+  font-size: 1.1em;
+  line-height: 1;
+  padding: 0 4px;
+}
+
+.vault-backup-panel-close:hover {
+  opacity: 1;
+}
+
+.vault-backup-status {
+  margin-bottom: 8px;
+}
+
+.vault-backup-bar-wrap {
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--background-modifier-border);
+  overflow: hidden;
+}
+
+.vault-backup-bar {
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: var(--interactive-accent);
+  transition: width 0.12s linear;
+}
+
+.vault-backup-count {
+  margin-top: 8px;
+  color: var(--text-muted);
+}
+
+.vault-backup-file {
+  margin-top: 2px;
+  color: var(--text-faint);
+  font-size: 0.85em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.vault-backup-panel.vault-backup-done .vault-backup-bar {
+  background: var(--text-success, var(--interactive-accent));
+}
+
+.vault-backup-panel.vault-backup-error .vault-backup-bar {
+  background: var(--text-error, #e03e3e);
+}
+
+.vault-backup-panel.vault-backup-error .vault-backup-status {
+  color: var(--text-error, #e03e3e);
+}
