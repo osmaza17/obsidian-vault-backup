@@ -1,5 +1,8 @@
 {
-  "destPath": "G:\\Mi unidad\\MISCELÁNEO\\COPIA DE SEGURIDAD OBSIDIAN",
+  "destPaths": [
+    "G:\\Mi unidad\\MISCELÁNEO\\COPIA DE SEGURIDAD OBSIDIAN",
+    "D:\\COPIAS SEGURIDAD OBSIDIAN"
+  ],
   "autoEnabled": true,
   "intervalMinutes": 30
 }

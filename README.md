@@ -1,8 +1,9 @@
 # Vault Backup
 
-Plugin de Obsidian que hace una copia de seguridad del vault entero a una carpeta
-externa que tu elijas, con un boton o de forma periodica. El resultado equivale a
-copiar la carpeta del vault desde el explorador y pegarla en otra ruta.
+Plugin de Obsidian que hace una copia de seguridad del vault entero a una o varias
+carpetas externas que tu elijas, con un boton o de forma periodica. El resultado
+equivale a copiar la carpeta del vault desde el explorador y pegarla en otra ruta
+(o en varias a la vez).
 
 ## Que hace
 
@@ -23,12 +24,14 @@ copiar la carpeta del vault desde el explorador y pegarla en otra ruta.
   ```
 
 - No borra copias antiguas: se guardan todas.
+- Si configuras **varias carpetas de destino**, la misma copia se guarda en todas
+  ellas (de forma secuencial, una tras otra). Si una falla, se intentan las demas.
 
 ## Como se usa
 
 1. Activa el plugin en Ajustes -> Plugins de la comunidad.
-2. En los ajustes del plugin, fija la **carpeta de destino** (debe estar fuera del
-   vault).
+2. En los ajustes del plugin, anade una o varias **carpetas de destino** con el
+   boton "Anadir carpeta de destino" (deben estar fuera del vault).
 3. Haz una copia:
    - Pulsando el boton "save" junto al conmutador de vault (abajo a la izquierda), o
    - Con el atajo `Ctrl+S`, o
@@ -41,7 +44,9 @@ cuantos **minutos** se hace, mientras Obsidian este abierto.
 
 ## Ajustes
 
-- **Carpeta de destino**: ruta absoluta donde se guardan las copias.
+- **Carpetas de destino**: una o varias rutas absolutas donde se guardan las
+  copias. Cada destino recibe su propia copia. Usa "Anadir carpeta de destino"
+  para agregar mas y el icono de papelera para quitar una.
 - **Copia automatica periodica**: activa o desactiva el guardado por intervalos.
 - **Intervalo (minutos)**: frecuencia de la copia automatica.
 

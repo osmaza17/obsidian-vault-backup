@@ -6,7 +6,8 @@ const fsp = require("fs/promises");
 const path = require("path");
 
 const DEFAULT_SETTINGS = {
-  destPath: "",
+  // Lista de carpetas de destino. La copia se guarda en todas ellas.
+  destPaths: [],
   autoEnabled: false,
   intervalMinutes: 30,
 };
@@ -162,7 +163,16 @@ class VaultBackupPlugin extends obsidian.Plugin {
   /* --------------------------- ajustes --------------------------- */
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = (await this.loadData()) || {};
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    if (!Array.isArray(this.settings.destPaths)) this.settings.destPaths = [];
+    // Migracion: el campo antiguo destPath (un solo string) pasa a la lista.
+    if (typeof data.destPath === "string" && data.destPath.trim()) {
+      if (!this.settings.destPaths.some((p) => p === data.destPath)) {
+        this.settings.destPaths.push(data.destPath);
+      }
+    }
+    delete this.settings.destPath;
   }
 
   async saveSettings() {
@@ -295,20 +305,52 @@ class VaultBackupPlugin extends obsidian.Plugin {
       return;
     }
 
-    const destRoot = (this.settings.destPath || "").trim();
-    if (!destRoot) {
+    // Lista de destinos: sin vacios y sin duplicados.
+    const rawDests = Array.isArray(this.settings.destPaths)
+      ? this.settings.destPaths
+      : [];
+    const seen = new Set();
+    const destRoots = [];
+    for (const raw of rawDests) {
+      const d = (raw || "").trim();
+      if (!d) continue;
+      const key = normForCompare(d);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      destRoots.push(d);
+    }
+
+    if (destRoots.length === 0) {
       if (trigger === "manual") {
         new obsidian.Notice(
-          "Vault Backup: configura primero una carpeta de destino en los ajustes."
+          "Vault Backup: configura primero al menos una carpeta de destino en los ajustes."
         );
       }
       return;
     }
 
-    // El destino no puede estar dentro del vault (copia recursiva infinita).
-    if (isInside(basePath, destRoot) || isInside(destRoot, basePath)) {
+    // Ningun destino puede estar dentro del vault (copia recursiva infinita)
+    // ni contener el vault. Los invalidos se omiten avisando.
+    const validDests = [];
+    const invalidDests = [];
+    for (const d of destRoots) {
+      if (isInside(basePath, d) || isInside(d, basePath)) {
+        invalidDests.push(d);
+      } else {
+        validDests.push(d);
+      }
+    }
+
+    if (invalidDests.length > 0) {
       new obsidian.Notice(
-        "Vault Backup: el destino no puede estar dentro del vault (ni al reves). Elige una carpeta externa."
+        "Vault Backup: se omiten destinos dentro del vault (o que lo contienen): " +
+          invalidDests.join(", ")
+      );
+    }
+
+    if (validDests.length === 0) {
+      new obsidian.Notice(
+        "Vault Backup: ningun destino valido. Elige carpetas externas al vault."
       );
       return;
     }
@@ -317,35 +359,62 @@ class VaultBackupPlugin extends obsidian.Plugin {
     const started = Date.now();
     const panel = this.progress;
     try {
-      fs.mkdirSync(destRoot, { recursive: true });
-
-      const folderName = this.computeBackupFolderName(destRoot);
       const vaultName = path.basename(basePath);
-      const targetDir = path.join(destRoot, folderName, vaultName);
 
-      // Red de seguridad: nunca copiar dentro del propio destino.
-      const skip = (absPath) => isInside(destRoot, absPath);
+      // Red de seguridad: nunca copiar dentro de ninguno de los destinos.
+      const skip = (absPath) => validDests.some((d) => isInside(d, absPath));
 
       panel.show();
-      panel.setStatus(`Preparando copia "${folderName}"...`);
+      panel.setStatus("Preparando copia...");
       panel.setProgress(0, "");
 
-      const total = await this.countFiles(basePath, skip);
-      panel.setTotal(total);
-      panel.setStatus(`Copiando a "${folderName}"...`);
+      // Mismos archivos en cada destino: total global = por copia x destinos.
+      const perDest = await this.countFiles(basePath, skip);
+      panel.setTotal(perDest * validDests.length);
 
-      const ctx = {
-        copied: 0,
-        onProgress: (copied, srcPath) =>
-          panel.setProgress(copied, path.relative(basePath, srcPath)),
-      };
-      await this.copyDir(basePath, targetDir, skip, ctx);
+      let copiedTotal = 0;
+      let okCount = 0;
+      const errors = [];
+
+      for (let i = 0; i < validDests.length; i++) {
+        const destRoot = validDests[i];
+        const label = `destino ${i + 1}/${validDests.length}`;
+        try {
+          fs.mkdirSync(destRoot, { recursive: true });
+          const folderName = this.computeBackupFolderName(destRoot);
+          const targetDir = path.join(destRoot, folderName, vaultName);
+          panel.setStatus(`Copiando a ${label}: "${folderName}"...`);
+
+          const base = copiedTotal;
+          const ctx = {
+            copied: 0,
+            onProgress: (copied, srcPath) =>
+              panel.setProgress(base + copied, path.relative(basePath, srcPath)),
+          };
+          await this.copyDir(basePath, targetDir, skip, ctx);
+          copiedTotal += ctx.copied;
+          okCount++;
+          console.log(
+            `[vault-backup] copia "${folderName}" -> ${destRoot}: ${ctx.copied} archivos`
+          );
+        } catch (e) {
+          console.error(`[vault-backup] error copiando a ${destRoot}:`, e);
+          errors.push(`${destRoot}: ${e && e.message ? e.message : e}`);
+        }
+      }
 
       const secs = ((Date.now() - started) / 1000).toFixed(1);
-      panel.setDone(`Copia completada: ${ctx.copied} archivos en ${secs}s`);
-      console.log(
-        `[vault-backup] copia "${folderName}" completada: ${ctx.copied} archivos en ${secs}s`
-      );
+      if (errors.length === 0) {
+        panel.setDone(
+          `Copia completada en ${okCount} destino(s): ${copiedTotal} archivos en ${secs}s`
+        );
+      } else if (okCount > 0) {
+        panel.setError(
+          `Copia parcial: ${okCount} ok, ${errors.length} con error. ${errors.join(" | ")}`
+        );
+      } else {
+        panel.setError(`Error en todos los destinos: ${errors.join(" | ")}`);
+      }
     } catch (e) {
       console.error("[vault-backup] error en la copia:", e);
       panel.setError(`Error: ${e && e.message ? e.message : e}`);
@@ -475,38 +544,75 @@ class VaultBackupSettingTab extends obsidian.PluginSettingTab {
 
     const info = containerEl.createEl("p", {
       text:
-        "Copia el vault entero (incluida la carpeta .obsidian) a la carpeta de destino. " +
-        "Cada copia se guarda en una subcarpeta con formato 'DD MM YYYY - N'. El destino debe estar FUERA del vault.",
+        "Copia el vault entero (incluida la carpeta .obsidian) a cada una de las carpetas de destino. " +
+        "Cada copia se guarda en una subcarpeta con formato 'DD MM YYYY - N'. Los destinos deben estar FUERA del vault.",
     });
     info.style.opacity = "0.8";
     info.style.fontSize = "0.85em";
 
-    // --- Carpeta de destino ---
+    // --- Carpetas de destino (varias) ---
     new obsidian.Setting(containerEl)
-      .setName("Carpeta de destino")
-      .setDesc("Ruta absoluta donde se guardaran las copias (p.ej. C:\\Backups\\SECOND BRAIN).")
-      .addText((text) =>
-        text
-          .setPlaceholder("C:\\Backups\\SECOND BRAIN")
-          .setValue(this.plugin.settings.destPath)
-          .onChange(async (value) => {
-            this.plugin.settings.destPath = value;
-            await this.plugin.saveSettings();
-          })
+      .setName("Carpetas de destino")
+      .setDesc(
+        "Anade una o varias rutas. La copia se guardara en todas ellas (de forma secuencial)."
       )
-      .addButton((btn) =>
-        btn
-          .setButtonText("Elegir...")
-          .setTooltip("Elegir carpeta con el explorador")
-          .onClick(async () => {
-            const picked = await this.pickFolder();
-            if (picked) {
-              this.plugin.settings.destPath = picked;
+      .setHeading();
+
+    const dests = this.plugin.settings.destPaths;
+    if (dests.length === 0) {
+      const empty = containerEl.createEl("p", {
+        text: "Todavia no hay carpetas de destino. Anade al menos una.",
+      });
+      empty.style.opacity = "0.8";
+      empty.style.fontSize = "0.85em";
+    }
+
+    dests.forEach((destPath, index) => {
+      new obsidian.Setting(containerEl)
+        .setName(`Destino ${index + 1}`)
+        .addText((text) =>
+          text
+            .setPlaceholder("C:\\Backups\\SECOND BRAIN")
+            .setValue(destPath)
+            .onChange(async (value) => {
+              this.plugin.settings.destPaths[index] = value;
+              await this.plugin.saveSettings();
+            })
+        )
+        .addExtraButton((btn) =>
+          btn
+            .setIcon("folder")
+            .setTooltip("Elegir carpeta con el explorador")
+            .onClick(async () => {
+              const picked = await this.pickFolder();
+              if (picked) {
+                this.plugin.settings.destPaths[index] = picked;
+                await this.plugin.saveSettings();
+                this.display();
+              }
+            })
+        )
+        .addExtraButton((btn) =>
+          btn
+            .setIcon("trash")
+            .setTooltip("Eliminar esta carpeta")
+            .onClick(async () => {
+              this.plugin.settings.destPaths.splice(index, 1);
               await this.plugin.saveSettings();
               this.display();
-            }
-          })
-      );
+            })
+        );
+    });
+
+    new obsidian.Setting(containerEl).addButton((btn) =>
+      btn
+        .setButtonText("Anadir carpeta de destino")
+        .onClick(async () => {
+          this.plugin.settings.destPaths.push("");
+          await this.plugin.saveSettings();
+          this.display();
+        })
+    );
 
     // --- Copia automatica ---
     new obsidian.Setting(containerEl)
