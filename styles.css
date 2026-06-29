@@ -100,3 +100,22 @@
 .vault-backup-panel.vault-backup-error .vault-backup-status {
   color: var(--text-error, #e03e3e);
 }
+
+/* Ajustes: fila de la carpeta de destino con campo de ruta ancho */
+.vault-backup-path-setting .setting-item-info {
+  flex: 0 0 auto;
+  margin-right: 12px;
+}
+
+.vault-backup-path-setting .setting-item-control {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.vault-backup-path-setting .vault-backup-path-input {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  /* Muestra el final de la ruta (lo mas distintivo) al perder el foco */
+  text-overflow: ellipsis;
+}

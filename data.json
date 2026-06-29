@@ -1,8 +1,17 @@
 {
-  "destPaths": [
-    "G:\\Mi unidad\\MISCELÁNEO\\COPIA DE SEGURIDAD OBSIDIAN",
-    "D:\\COPIAS SEGURIDAD OBSIDIAN"
+  "destinations": [
+    {
+      "path": "G:\\Mi unidad\\MISCELÁNEO\\COPIA DE SEGURIDAD OBSIDIAN",
+      "autoEnabled": true,
+      "intervalMinutes": 60
+    },
+    {
+      "path": "C:\\Users\\oscar\\Documents\\SECOND BRAIN BACKUPS",
+      "autoEnabled": true,
+      "intervalMinutes": 120
+    }
   ],
+  "excludePaths": [],
   "autoEnabled": true,
-  "intervalMinutes": 30
+  "intervalMinutes": 120
 }

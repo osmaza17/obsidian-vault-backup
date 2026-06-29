@@ -6,14 +6,26 @@ const fsp = require("fs/promises");
 const path = require("path");
 
 const DEFAULT_SETTINGS = {
-  // Lista de carpetas de destino. La copia se guarda en todas ellas.
-  destPaths: [],
+  // Lista de carpetas de destino. Cada destino es un objeto con su propio
+  // horario: { path, autoEnabled, intervalMinutes }. La copia manual se guarda
+  // en todos; la copia automatica de cada destino corre con su propio intervalo.
+  destinations: [],
+  // Rutas (relativas a la raiz del vault) que NO se copian en la backup.
+  // Util para carpetas pesadas que no son contenido (p.ej. binarios/modelos).
+  excludePaths: [],
+  // Valores por defecto al anadir una carpeta de destino nueva.
   autoEnabled: false,
   intervalMinutes: 30,
 };
 
 /* ------------------------------------------------------------------ */
 /* Utilidades                                                          */
+/* ------------------------------------------------------------------ */
+/* NOTA: la logica de copia (todayStamp, normForCompare, isInside,     */
+/* computeBackupFolderName, countFiles, copyDir y el flujo de          */
+/* runBackup) esta DUPLICADA en backup-cli.js para poder lanzar la     */
+/* copia desde la terminal sin Obsidian. Si cambias la copia aqui,     */
+/* actualiza tambien backup-cli.js para que sigan haciendo lo mismo.   */
 /* ------------------------------------------------------------------ */
 
 // Fecha de hoy con formato "DD MM YYYY".
@@ -47,7 +59,8 @@ class VaultBackupPlugin extends obsidian.Plugin {
   constructor() {
     super(...arguments);
     this.isBackingUp = false;
-    this.intervalId = null;
+    // Un temporizador por destino con copia automatica activada.
+    this.intervalIds = [];
     this.bottomBtn = null;
     this.statusBtn = null;
     this.progress = new BackupProgressPanel();
@@ -165,13 +178,41 @@ class VaultBackupPlugin extends obsidian.Plugin {
   async loadSettings() {
     const data = (await this.loadData()) || {};
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
-    if (!Array.isArray(this.settings.destPaths)) this.settings.destPaths = [];
-    // Migracion: el campo antiguo destPath (un solo string) pasa a la lista.
-    if (typeof data.destPath === "string" && data.destPath.trim()) {
-      if (!this.settings.destPaths.some((p) => p === data.destPath)) {
-        this.settings.destPaths.push(data.destPath);
-      }
+    if (!Array.isArray(this.settings.excludePaths)) this.settings.excludePaths = [];
+
+    // Valores por defecto de horario, tomados de los ajustes globales antiguos.
+    const defAuto = !!this.settings.autoEnabled;
+    const defMinsRaw = Number(this.settings.intervalMinutes);
+    const defMins = defMinsRaw > 0 ? defMinsRaw : 30;
+
+    // Reunimos los destinos de todos los formatos historicos.
+    let raw = Array.isArray(this.settings.destinations)
+      ? this.settings.destinations.slice()
+      : [];
+    // Migracion desde destPaths (lista de strings).
+    if (Array.isArray(data.destPaths)) {
+      for (const p of data.destPaths) raw.push(p);
     }
+    // Migracion desde destPath (un solo string, formato mas antiguo).
+    if (typeof data.destPath === "string" && data.destPath.trim()) {
+      raw.push(data.destPath);
+    }
+
+    // Normalizamos cada entrada a { path, autoEnabled, intervalMinutes }.
+    this.settings.destinations = raw
+      .map((d) => {
+        if (typeof d === "string") d = { path: d };
+        if (!d || typeof d !== "object") return null;
+        const mins = Number(d.intervalMinutes);
+        return {
+          path: typeof d.path === "string" ? d.path : "",
+          autoEnabled: typeof d.autoEnabled === "boolean" ? d.autoEnabled : defAuto,
+          intervalMinutes: mins > 0 ? mins : defMins,
+        };
+      })
+      .filter(Boolean);
+
+    delete this.settings.destPaths;
     delete this.settings.destPath;
   }
 
@@ -182,22 +223,32 @@ class VaultBackupPlugin extends obsidian.Plugin {
   /* --------------------------- horario --------------------------- */
 
   clearSchedule() {
-    if (this.intervalId !== null) {
-      window.clearInterval(this.intervalId);
-      this.intervalId = null;
+    if (Array.isArray(this.intervalIds)) {
+      for (const id of this.intervalIds) window.clearInterval(id);
     }
+    this.intervalIds = [];
   }
 
+  // Programa un temporizador independiente por cada destino que tenga la copia
+  // automatica activada, con su propio intervalo en minutos. Cada disparo solo
+  // copia a ESE destino.
   applySchedule() {
     this.clearSchedule();
-    const mins = Number(this.settings.intervalMinutes);
-    if (!this.settings.autoEnabled || !(mins > 0)) return;
-    this.intervalId = window.setInterval(
-      () => this.runBackup("auto"),
-      mins * 60000
-    );
-    // Para que Obsidian lo limpie tambien al descargar el plugin.
-    this.registerInterval(this.intervalId);
+    const dests = Array.isArray(this.settings.destinations)
+      ? this.settings.destinations
+      : [];
+    for (const dest of dests) {
+      const p = (dest.path || "").trim();
+      const mins = Number(dest.intervalMinutes);
+      if (!p || !dest.autoEnabled || !(mins > 0)) continue;
+      const id = window.setInterval(
+        () => this.runBackup("auto", [p]),
+        mins * 60000
+      );
+      this.intervalIds.push(id);
+      // Para que Obsidian lo limpie tambien al descargar el plugin.
+      this.registerInterval(id);
+    }
   }
 
   /* --------------------------- vault ----------------------------- */
@@ -289,7 +340,10 @@ class VaultBackupPlugin extends obsidian.Plugin {
     return ctx.copied;
   }
 
-  async runBackup(trigger) {
+  // trigger: "manual" | "auto". onlyPaths (opcional): si se pasa, solo se copia
+  // a esas rutas (lo usa cada temporizador para copiar a su propio destino). Sin
+  // onlyPaths se copia a todos los destinos configurados.
+  async runBackup(trigger, onlyPaths) {
     if (this.isBackingUp) {
       if (trigger === "manual") {
         new obsidian.Notice("Ya hay una copia de seguridad en curso.");
@@ -306,9 +360,11 @@ class VaultBackupPlugin extends obsidian.Plugin {
     }
 
     // Lista de destinos: sin vacios y sin duplicados.
-    const rawDests = Array.isArray(this.settings.destPaths)
-      ? this.settings.destPaths
-      : [];
+    const rawDests = Array.isArray(onlyPaths)
+      ? onlyPaths
+      : (Array.isArray(this.settings.destinations)
+          ? this.settings.destinations.map((d) => (d && d.path) || "")
+          : []);
     const seen = new Set();
     const destRoots = [];
     for (const raw of rawDests) {
@@ -361,8 +417,19 @@ class VaultBackupPlugin extends obsidian.Plugin {
     try {
       const vaultName = path.basename(basePath);
 
-      // Red de seguridad: nunca copiar dentro de ninguno de los destinos.
-      const skip = (absPath) => validDests.some((d) => isInside(d, absPath));
+      // Rutas excluidas por el usuario, resueltas a absoluto contra el vault.
+      const excluded = (
+        Array.isArray(this.settings.excludePaths) ? this.settings.excludePaths : []
+      )
+        .map((rel) => (rel || "").trim())
+        .filter(Boolean)
+        .map((rel) => path.resolve(basePath, rel));
+
+      // Red de seguridad: nunca copiar dentro de un destino, ni de una ruta
+      // excluida por el usuario.
+      const skip = (absPath) =>
+        validDests.some((d) => isInside(d, absPath)) ||
+        excluded.some((ex) => isInside(ex, absPath));
 
       panel.show();
       panel.setStatus("Preparando copia...");
@@ -545,20 +612,22 @@ class VaultBackupSettingTab extends obsidian.PluginSettingTab {
     const info = containerEl.createEl("p", {
       text:
         "Copia el vault entero (incluida la carpeta .obsidian) a cada una de las carpetas de destino. " +
-        "Cada copia se guarda en una subcarpeta con formato 'DD MM YYYY - N'. Los destinos deben estar FUERA del vault.",
+        "Cada copia se guarda en una subcarpeta con formato 'DD MM YYYY - N'. Los destinos deben estar FUERA del vault. " +
+        "Cada destino tiene su propia copia automatica con su propio intervalo.",
     });
     info.style.opacity = "0.8";
     info.style.fontSize = "0.85em";
 
-    // --- Carpetas de destino (varias) ---
+    // --- Carpetas de destino (varias, con horario propio) ---
     new obsidian.Setting(containerEl)
       .setName("Carpetas de destino")
       .setDesc(
-        "Anade una o varias rutas. La copia se guardara en todas ellas (de forma secuencial)."
+        "Anade una o varias rutas. La copia manual se guarda en todas (de forma " +
+          "secuencial). Cada destino puede ademas tener su propia copia automatica."
       )
       .setHeading();
 
-    const dests = this.plugin.settings.destPaths;
+    const dests = this.plugin.settings.destinations;
     if (dests.length === 0) {
       const empty = containerEl.createEl("p", {
         text: "Todavia no hay carpetas de destino. Anade al menos una.",
@@ -567,18 +636,23 @@ class VaultBackupSettingTab extends obsidian.PluginSettingTab {
       empty.style.fontSize = "0.85em";
     }
 
-    dests.forEach((destPath, index) => {
-      new obsidian.Setting(containerEl)
+    dests.forEach((dest, index) => {
+      // Fila 1: ruta del destino + elegir carpeta + eliminar.
+      // El campo de texto ocupa todo el ancho disponible para ver bien la ruta.
+      const pathSetting = new obsidian.Setting(containerEl)
         .setName(`Destino ${index + 1}`)
-        .addText((text) =>
+        .addText((text) => {
           text
             .setPlaceholder("C:\\Backups\\SECOND BRAIN")
-            .setValue(destPath)
+            .setValue(dest.path)
             .onChange(async (value) => {
-              this.plugin.settings.destPaths[index] = value;
+              dest.path = value;
               await this.plugin.saveSettings();
-            })
-        )
+              this.plugin.applySchedule();
+            });
+          text.inputEl.addClass("vault-backup-path-input");
+          text.inputEl.setAttr("aria-label", "Ruta de la carpeta de destino");
+        })
         .addExtraButton((btn) =>
           btn
             .setIcon("folder")
@@ -586,8 +660,9 @@ class VaultBackupSettingTab extends obsidian.PluginSettingTab {
             .onClick(async () => {
               const picked = await this.pickFolder();
               if (picked) {
-                this.plugin.settings.destPaths[index] = picked;
+                dest.path = picked;
                 await this.plugin.saveSettings();
+                this.plugin.applySchedule();
                 this.display();
               }
             })
@@ -597,7 +672,96 @@ class VaultBackupSettingTab extends obsidian.PluginSettingTab {
             .setIcon("trash")
             .setTooltip("Eliminar esta carpeta")
             .onClick(async () => {
-              this.plugin.settings.destPaths.splice(index, 1);
+              this.plugin.settings.destinations.splice(index, 1);
+              await this.plugin.saveSettings();
+              this.plugin.applySchedule();
+              this.display();
+            })
+        );
+      // Que el control (input + botones) se lleve el ancho, no el nombre.
+      pathSetting.settingEl.addClass("vault-backup-path-setting");
+
+      // Fila 2 (sangrada): copia automatica e intervalo para este destino.
+      const schedSetting = new obsidian.Setting(containerEl)
+        .setName("Copia automatica")
+        .setDesc("Copia periodica solo de este destino mientras Obsidian este abierto.")
+        .addToggle((tog) =>
+          tog.setValue(dest.autoEnabled).onChange(async (value) => {
+            dest.autoEnabled = value;
+            await this.plugin.saveSettings();
+            this.plugin.applySchedule();
+          })
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder("min")
+            .setValue(String(dest.intervalMinutes))
+            .onChange(async (value) => {
+              const n = parseInt(value, 10);
+              if (!isNaN(n) && n > 0) {
+                dest.intervalMinutes = n;
+                await this.plugin.saveSettings();
+                this.plugin.applySchedule();
+              }
+            })
+        );
+      schedSetting.controlEl
+        .querySelectorAll("input[type='text']")
+        .forEach((el) => el.setAttr("aria-label", "Intervalo en minutos"));
+      schedSetting.settingEl.style.paddingLeft = "2em";
+      schedSetting.settingEl.style.opacity = "0.9";
+    });
+
+    new obsidian.Setting(containerEl).addButton((btn) =>
+      btn
+        .setButtonText("Anadir carpeta de destino")
+        .onClick(async () => {
+          this.plugin.settings.destinations.push({
+            path: "",
+            autoEnabled: this.plugin.settings.autoEnabled,
+            intervalMinutes: this.plugin.settings.intervalMinutes,
+          });
+          await this.plugin.saveSettings();
+          this.display();
+        })
+    );
+
+    // --- Carpetas/archivos excluidos ---
+    new obsidian.Setting(containerEl)
+      .setName("Excluir de la copia")
+      .setDesc(
+        "Rutas (relativas a la raiz del vault) que NO se copiaran. Util para " +
+          "carpetas pesadas que no son contenido, como binarios o modelos."
+      )
+      .setHeading();
+
+    const excludes = this.plugin.settings.excludePaths;
+    if (excludes.length === 0) {
+      const empty = containerEl.createEl("p", {
+        text: "No hay nada excluido. La copia incluye todo el vault.",
+      });
+      empty.style.opacity = "0.8";
+      empty.style.fontSize = "0.85em";
+    }
+
+    excludes.forEach((relPath, index) => {
+      new obsidian.Setting(containerEl)
+        .setName(`Exclusion ${index + 1}`)
+        .addText((text) =>
+          text
+            .setPlaceholder(".claude/skills/.../offline")
+            .setValue(relPath)
+            .onChange(async (value) => {
+              this.plugin.settings.excludePaths[index] = value;
+              await this.plugin.saveSettings();
+            })
+        )
+        .addExtraButton((btn) =>
+          btn
+            .setIcon("trash")
+            .setTooltip("Quitar esta exclusion")
+            .onClick(async () => {
+              this.plugin.settings.excludePaths.splice(index, 1);
               await this.plugin.saveSettings();
               this.display();
             })
@@ -605,42 +769,12 @@ class VaultBackupSettingTab extends obsidian.PluginSettingTab {
     });
 
     new obsidian.Setting(containerEl).addButton((btn) =>
-      btn
-        .setButtonText("Anadir carpeta de destino")
-        .onClick(async () => {
-          this.plugin.settings.destPaths.push("");
-          await this.plugin.saveSettings();
-          this.display();
-        })
+      btn.setButtonText("Anadir exclusion").onClick(async () => {
+        this.plugin.settings.excludePaths.push("");
+        await this.plugin.saveSettings();
+        this.display();
+      })
     );
-
-    // --- Copia automatica ---
-    new obsidian.Setting(containerEl)
-      .setName("Copia automatica periodica")
-      .setDesc("Hace una copia cada cierto tiempo mientras Obsidian este abierto.")
-      .addToggle((tog) =>
-        tog.setValue(this.plugin.settings.autoEnabled).onChange(async (value) => {
-          this.plugin.settings.autoEnabled = value;
-          await this.plugin.saveSettings();
-          this.plugin.applySchedule();
-        })
-      );
-
-    new obsidian.Setting(containerEl)
-      .setName("Intervalo (minutos)")
-      .setDesc("Cada cuantos minutos se hace la copia automatica.")
-      .addText((text) =>
-        text
-          .setValue(String(this.plugin.settings.intervalMinutes))
-          .onChange(async (value) => {
-            const n = parseInt(value, 10);
-            if (!isNaN(n) && n > 0) {
-              this.plugin.settings.intervalMinutes = n;
-              await this.plugin.saveSettings();
-              this.plugin.applySchedule();
-            }
-          })
-      );
 
     // --- Boton manual ---
     new obsidian.Setting(containerEl)

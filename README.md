@@ -24,8 +24,13 @@ equivale a copiar la carpeta del vault desde el explorador y pegarla en otra rut
   ```
 
 - No borra copias antiguas: se guardan todas.
-- Si configuras **varias carpetas de destino**, la misma copia se guarda en todas
+- Si configuras **varias carpetas de destino**, la copia manual se guarda en todas
   ellas (de forma secuencial, una tras otra). Si una falla, se intentan las demas.
+- Cada carpeta de destino tiene su **propia copia automatica**: puedes activarla de
+  forma independiente y con un **intervalo distinto** para cada destino. Asi puedes,
+  por ejemplo, copiar a una ruta cada 30 minutos y a otra cada 6 horas.
+- Puedes **excluir carpetas o archivos** de la copia (rutas relativas a la raiz del
+  vault), util para carpetas pesadas que no son contenido (binarios, modelos...).
 
 ## Como se usa
 
@@ -37,18 +42,56 @@ equivale a copiar la carpeta del vault desde el explorador y pegarla en otra rut
    - Con el atajo `Ctrl+S`, o
    - Con el comando "Hacer copia de seguridad ahora".
 
-### Copia automatica
+### Copia automatica (por destino)
 
-En los ajustes puedes activar la **copia automatica periodica** e indicar cada
-cuantos **minutos** se hace, mientras Obsidian este abierto.
+Cada carpeta de destino tiene, debajo de su ruta, su propio interruptor de **copia
+automatica** y su propio **intervalo en minutos**. Activa solo los destinos que
+quieras automatizar y dale a cada uno la frecuencia que prefieras, mientras
+Obsidian este abierto. Los temporizadores son independientes entre si.
+
+> Nota: si un destino dispara su copia mientras otra copia ya esta en curso, se
+> omite y se reintentara en su siguiente intervalo (no se solapan copias).
+
+### Lanzar desde la terminal (Claude Code)
+
+Puedes lanzar **la misma copia** que hace el boton o `Ctrl+S` desde la terminal,
+con un pequeno script de Node (`backup-cli.js`). Funciona aunque Obsidian este
+cerrado y usa la misma configuracion (`data.json`):
+
+```sh
+# Copia a TODOS los destinos configurados
+node "<vault>/.obsidian/plugins/vault-backup/backup-cli.js"
+
+# Solo a algunos destinos, por numero (segun el orden de los ajustes)
+node backup-cli.js 1 3
+
+# Solo a una ruta concreta
+node backup-cli.js "C:\Backups\SECOND BRAIN"
+
+# Ver la configuracion (vault, destinos, exclusiones) sin copiar nada
+node backup-cli.js --list
+
+# Forzar la raiz del vault (si el script no la detecta bien)
+node backup-cli.js --vault "<ruta-al-vault>"
+
+# Ayuda
+node backup-cli.js --help
+```
+
+Por defecto el script deduce la raiz del vault subiendo tres niveles desde la
+carpeta del plugin. Requiere tener Node.js instalado. Devuelve codigo de salida 0
+si todo fue bien y distinto de 0 si hubo errores, asi que se puede encadenar en
+scripts.
 
 ## Ajustes
 
 - **Carpetas de destino**: una o varias rutas absolutas donde se guardan las
   copias. Cada destino recibe su propia copia. Usa "Anadir carpeta de destino"
   para agregar mas y el icono de papelera para quitar una.
-- **Copia automatica periodica**: activa o desactiva el guardado por intervalos.
-- **Intervalo (minutos)**: frecuencia de la copia automatica.
+  - Debajo de cada ruta: **Copia automatica** (interruptor) e **intervalo en
+    minutos**, configurables de forma independiente para ese destino.
+- **Excluir de la copia**: lista de rutas (relativas a la raiz del vault) que NO se
+  copiaran. Usa "Anadir exclusion" para agregar y el icono de papelera para quitar.
 
 ## Notas
 
@@ -60,7 +103,8 @@ cuantos **minutos** se hace, mientras Obsidian este abierto.
 ## Instalacion manual
 
 Copia `main.js`, `manifest.json` y `styles.css` a
-`<tu-vault>/.obsidian/plugins/vault-backup/` y activa el plugin.
+`<tu-vault>/.obsidian/plugins/vault-backup/` y activa el plugin. Incluye tambien
+`backup-cli.js` si quieres poder lanzar la copia desde la terminal.
 
 ## Licencia
 
