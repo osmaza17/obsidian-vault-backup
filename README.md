@@ -83,6 +83,12 @@ carpeta del plugin. Requiere tener Node.js instalado. Devuelve codigo de salida 
 si todo fue bien y distinto de 0 si hubo errores, asi que se puede encadenar en
 scripts.
 
+**Panel de progreso tambien desde la terminal:** si Obsidian esta abierto cuando
+lanzas la copia desde la terminal, veras el **mismo panel** de progreso en la
+esquina inferior izquierda que con el boton o `Ctrl+S`. El script escribe su avance
+en un archivo de estado (`.cli-backup-status.json`) y el plugin lo refleja en el
+panel. Si Obsidian esta cerrado, la copia funciona igual, solo que sin panel.
+
 ## Ajustes
 
 - **Carpetas de destino**: una o varias rutas absolutas donde se guardan las

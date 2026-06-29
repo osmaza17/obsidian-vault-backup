@@ -1,3 +1,6 @@
 # Sistema
 .DS_Store
 node_modules/
+
+# Estado efimero de una copia lanzada desde backup-cli.js
+.cli-backup-status.json

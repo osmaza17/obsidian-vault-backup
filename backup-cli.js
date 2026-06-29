@@ -27,6 +27,39 @@ const fsp = require("fs/promises");
 const path = require("path");
 
 /* ------------------------------------------------------------------ */
+/* Estado para el panel del plugin                                     */
+/* ------------------------------------------------------------------ */
+/* El CLI escribe su progreso en este archivo (dentro de la carpeta    */
+/* del plugin). Si Obsidian esta abierto, el plugin lo vigila y muestra */
+/* su panel de progreso. Es best-effort: si escribir falla, la copia   */
+/* continua igual. El nombre debe coincidir con CLI_STATUS_FILE de      */
+/* main.js.                                                            */
+
+const CLI_STATUS_FILE = ".cli-backup-status.json";
+const STATUS_PATH = path.join(__dirname, CLI_STATUS_FILE);
+let statusStartedAt = 0;
+
+function writeStatus(obj) {
+  try {
+    const payload = Object.assign(
+      { pid: process.pid, startedAt: statusStartedAt, updatedAt: Date.now() },
+      obj
+    );
+    fs.writeFileSync(STATUS_PATH, JSON.stringify(payload));
+  } catch (e) {
+    // Ignorado a proposito: el estado es solo para la UI de Obsidian.
+  }
+}
+
+function clearStatus() {
+  try {
+    fs.unlinkSync(STATUS_PATH);
+  } catch (e) {
+    // No existia; nada que limpiar.
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Logica de copia (replica de main.js)                                */
 /* ------------------------------------------------------------------ */
 
@@ -291,9 +324,16 @@ async function main() {
     .filter(Boolean)
     .map((rel) => path.resolve(basePath, rel));
 
+  const statusNorm = normForCompare(STATUS_PATH);
   const skip = (absPath) =>
     validDests.some((d) => isInside(d, absPath)) ||
-    excluded.some((ex) => isInside(ex, absPath));
+    excluded.some((ex) => isInside(ex, absPath)) ||
+    normForCompare(absPath) === statusNorm;
+
+  // Estado para el panel del plugin: arranca limpio y marca el inicio.
+  statusStartedAt = Date.now();
+  clearStatus();
+  writeStatus({ phase: "counting", status: "Preparando copia...", total: 0, copied: 0, file: "" });
 
   console.log(`[vault-backup] Vault: ${basePath}`);
   console.log(`[vault-backup] Destinos validos: ${validDests.length}`);
@@ -303,6 +343,7 @@ async function main() {
   const perDest = await countFiles(basePath, skip);
   const total = perDest * validDests.length;
   console.log(`[vault-backup] ${perDest} archivos por destino (total ${total}).`);
+  writeStatus({ phase: "copying", status: "Iniciando copia...", total, copied: 0, file: "" });
 
   let copiedTotal = 0;
   let okCount = 0;
@@ -317,17 +358,31 @@ async function main() {
       const folderName = computeBackupFolderName(destRoot);
       const targetDir = path.join(destRoot, folderName, vaultName);
       console.log(`[vault-backup] Copiando a ${label}: "${folderName}" -> ${destRoot}`);
+      writeStatus({
+        phase: "copying",
+        status: `Copiando a ${label}: "${folderName}"`,
+        total,
+        copied: copiedTotal,
+        file: "",
+      });
 
       const base = copiedTotal;
       const ctx = {
         copied: 0,
-        onProgress: (copied) => {
+        onProgress: (copied, srcPath) => {
           const now = Date.now();
           if (now - lastPaint < 250) return;
           lastPaint = now;
           const done = base + copied;
           const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
           process.stdout.write(`\r[vault-backup] ${done} / ${total} archivos (${pct}%)   `);
+          writeStatus({
+            phase: "copying",
+            status: `Copiando a ${label}: "${folderName}"`,
+            total,
+            copied: done,
+            file: path.relative(basePath, srcPath),
+          });
         },
       };
       await copyDir(basePath, targetDir, skip, ctx);
@@ -344,18 +399,20 @@ async function main() {
 
   const secs = ((Date.now() - started) / 1000).toFixed(1);
   if (errors.length === 0) {
-    console.log(
-      `[vault-backup] Copia completada en ${okCount} destino(s): ${copiedTotal} archivos en ${secs}s`
-    );
+    const msg = `Copia completada en ${okCount} destino(s): ${copiedTotal} archivos en ${secs}s`;
+    console.log(`[vault-backup] ${msg}`);
+    writeStatus({ phase: "done", status: msg, total, copied: copiedTotal, file: "" });
     return 0;
   }
   if (okCount > 0) {
-    console.error(
-      `[vault-backup] Copia parcial: ${okCount} ok, ${errors.length} con error en ${secs}s`
-    );
+    const msg = `Copia parcial: ${okCount} ok, ${errors.length} con error en ${secs}s`;
+    console.error(`[vault-backup] ${msg}`);
+    writeStatus({ phase: "error", status: msg, total, copied: copiedTotal, file: "" });
     return 1;
   }
-  console.error(`[vault-backup] Error en todos los destinos: ${errors.join(" | ")}`);
+  const msg = `Error en todos los destinos: ${errors.join(" | ")}`;
+  console.error(`[vault-backup] ${msg}`);
+  writeStatus({ phase: "error", status: msg, total, copied: copiedTotal, file: "" });
   return 1;
 }
 

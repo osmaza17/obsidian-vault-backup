@@ -5,6 +5,12 @@ const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
 
+// Nombre del archivo donde backup-cli.js escribe su progreso para que el plugin,
+// si Obsidian esta abierto, pueda mostrar el panel de una copia lanzada desde la
+// terminal. Vive en la carpeta del plugin (dentro del vault) y se excluye de la
+// copia.
+const CLI_STATUS_FILE = ".cli-backup-status.json";
+
 const DEFAULT_SETTINGS = {
   // Lista de carpetas de destino. Cada destino es un objeto con su propio
   // horario: { path, autoEnabled, intervalMinutes }. La copia manual se guarda
@@ -51,6 +57,62 @@ function isInside(parent, child) {
   return b.startsWith(a + path.sep.toLowerCase()) || b.startsWith(a + "/");
 }
 
+// Interpreta el estado que escribe backup-cli.js y decide que hacer con el panel,
+// SIN tocar el DOM (asi se puede probar aislado). Argumentos:
+//   st: objeto leido del archivo de estado, o null si no existe / no se pudo leer.
+//   now: Date.now().
+//   shownStartedAt: el startedAt de la copia de terminal que el panel ya muestra
+//     (o null si no esta mostrando ninguna).
+// Devuelve { action, ... }:
+//   "none"           -> no hacer nada.
+//   "hide"           -> ocultar el panel.
+//   "progress"       -> mostrar/actualizar progreso (status, total, copied, file).
+//   "finalize-done"  -> marcar copia terminada (text, total).
+//   "finalize-error" -> marcar copia con error (text, total).
+// isNew indica si es una copia de terminal distinta de la que ya se mostraba.
+function interpretCliStatus(st, now, shownStartedAt) {
+  if (!st || typeof st !== "object") {
+    return shownStartedAt !== null ? { action: "hide" } : { action: "none" };
+  }
+  const startedAt = Number(st.startedAt) || 0;
+  const age = now - (Number(st.updatedAt) || 0);
+  const isNew = shownStartedAt !== startedAt;
+
+  if (st.phase === "done" || st.phase === "error") {
+    // Un estado final viejo lo limpia el arranque del plugin o el siguiente CLI;
+    // aqui no lo mostramos para no resucitar copias antiguas.
+    if (age > 15000) return { action: "none" };
+    return {
+      action: st.phase === "done" ? "finalize-done" : "finalize-error",
+      startedAt,
+      isNew,
+      total: Number(st.total) || 0,
+      text:
+        st.status ||
+        (st.phase === "done" ? "Copia completada" : "Error en la copia"),
+    };
+  }
+
+  if (st.phase === "counting" || st.phase === "copying") {
+    // Si el estado activo lleva mucho sin refrescarse, la copia de terminal
+    // murio o se colgo: ocultamos el panel si era esa copia la que mostrabamos.
+    if (age > 30000) {
+      return shownStartedAt === startedAt ? { action: "hide" } : { action: "none" };
+    }
+    return {
+      action: "progress",
+      startedAt,
+      isNew,
+      status: st.status || "",
+      total: Number(st.total) || 0,
+      copied: Number(st.copied) || 0,
+      file: st.file || "",
+    };
+  }
+
+  return { action: "none" };
+}
+
 /* ------------------------------------------------------------------ */
 /* Plugin                                                              */
 /* ------------------------------------------------------------------ */
@@ -64,6 +126,10 @@ class VaultBackupPlugin extends obsidian.Plugin {
     this.bottomBtn = null;
     this.statusBtn = null;
     this.progress = new BackupProgressPanel();
+    // Vigilante del archivo de estado de backup-cli.js (copias por terminal).
+    this.cliWatchId = null;
+    // startedAt de la copia de terminal que el panel muestra ahora (o null).
+    this.cliShownFor = null;
   }
 
   async onload() {
@@ -83,11 +149,21 @@ class VaultBackupPlugin extends obsidian.Plugin {
 
     this.applySchedule();
 
+    // Si la copia se lanza desde backup-cli.js (terminal), mostramos el mismo
+    // panel leyendo el archivo de estado que escribe el CLI. Limpiamos primero
+    // cualquier estado viejo que hubiera quedado de una sesion anterior.
+    this.cleanupCliStatus();
+    this.startCliWatch();
+
     console.log("[vault-backup] cargado");
   }
 
   onunload() {
     this.clearSchedule();
+    if (this.cliWatchId) {
+      window.clearInterval(this.cliWatchId);
+      this.cliWatchId = null;
+    }
     if (this.bottomBtn) {
       this.bottomBtn.remove();
       this.bottomBtn = null;
@@ -426,10 +502,13 @@ class VaultBackupPlugin extends obsidian.Plugin {
         .map((rel) => path.resolve(basePath, rel));
 
       // Red de seguridad: nunca copiar dentro de un destino, ni de una ruta
-      // excluida por el usuario.
+      // excluida por el usuario, ni el archivo de estado del CLI.
+      const cliStatusPath = this.getCliStatusPath();
+      const cliStatusNorm = cliStatusPath ? normForCompare(cliStatusPath) : null;
       const skip = (absPath) =>
         validDests.some((d) => isInside(d, absPath)) ||
-        excluded.some((ex) => isInside(ex, absPath));
+        excluded.some((ex) => isInside(ex, absPath)) ||
+        (cliStatusNorm !== null && normForCompare(absPath) === cliStatusNorm);
 
       panel.show();
       panel.setStatus("Preparando copia...");
@@ -487,6 +566,87 @@ class VaultBackupPlugin extends obsidian.Plugin {
       panel.setError(`Error: ${e && e.message ? e.message : e}`);
     } finally {
       this.isBackingUp = false;
+    }
+  }
+
+  /* ---------------- panel para copias desde terminal ---------------- */
+
+  // Ruta del archivo de estado que escribe backup-cli.js (en la carpeta del
+  // plugin). Debe coincidir con la que usa el CLI (su __dirname).
+  getCliStatusPath() {
+    const base = this.getVaultBasePath();
+    if (!base) return null;
+    const dir =
+      this.manifest && this.manifest.dir
+        ? this.manifest.dir
+        : ".obsidian/plugins/vault-backup";
+    return path.join(base, dir, CLI_STATUS_FILE);
+  }
+
+  cleanupCliStatus() {
+    try {
+      const p = this.getCliStatusPath();
+      if (p && fs.existsSync(p)) fs.unlinkSync(p);
+    } catch (e) {
+      // Solo es el archivo de estado del CLI; si falla, no pasa nada.
+    }
+  }
+
+  readCliStatus() {
+    try {
+      const p = this.getCliStatusPath();
+      if (!p) return null;
+      return JSON.parse(fs.readFileSync(p, "utf8"));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  startCliWatch() {
+    const id = window.setInterval(() => this.cliWatchTick(), 200);
+    this.cliWatchId = id;
+    this.registerInterval(id);
+  }
+
+  // Lee el estado del CLI y refleja su progreso en el panel. No hace nada si el
+  // propio plugin esta copiando (en ese caso el panel ya es suyo).
+  cliWatchTick() {
+    if (this.isBackingUp) return;
+    const decision = interpretCliStatus(
+      this.readCliStatus(),
+      Date.now(),
+      this.cliShownFor
+    );
+    const panel = this.progress;
+    switch (decision.action) {
+      case "hide":
+        panel.hide();
+        this.cliShownFor = null;
+        return;
+      case "progress":
+        if (decision.isNew) {
+          panel.show();
+          this.cliShownFor = decision.startedAt;
+        }
+        panel.setTotal(decision.total);
+        panel.setStatus(decision.status);
+        panel.setProgress(decision.copied, decision.file);
+        return;
+      case "finalize-done":
+      case "finalize-error":
+        if (decision.isNew) {
+          panel.show();
+          this.cliShownFor = decision.startedAt;
+        }
+        panel.setTotal(decision.total);
+        if (decision.action === "finalize-done") panel.setDone(decision.text);
+        else panel.setError(decision.text);
+        this.cliShownFor = null;
+        // Consumido: borramos el archivo para no volver a procesarlo.
+        this.cleanupCliStatus();
+        return;
+      default:
+        return; // "none"
     }
   }
 }
@@ -813,3 +973,5 @@ class VaultBackupSettingTab extends obsidian.PluginSettingTab {
 }
 
 module.exports = VaultBackupPlugin;
+// Ayudante puro expuesto solo para pruebas; no afecta a la carga en Obsidian.
+module.exports.interpretCliStatus = interpretCliStatus;
