@@ -188,6 +188,58 @@ async function copyDir(src, dest, shouldSkip, ctx) {
   return ctx.copied;
 }
 
+// Verificacion barata tras copiar (replica de main.js): recorre el origen igual
+// que copyDir y comprueba que cada archivo existe en el destino con el MISMO
+// tamano (stat, sin releer el contenido). Detecta copias incompletas, truncados
+// o que falten; NO detecta corrupcion bit a bit silenciosa. Devuelve
+// { checked, count, mismatches }.
+async function verifyCopy(src, dest, shouldSkip) {
+  const MAX_REPORT = 20;
+  const detailed = [];
+  let checked = 0;
+  let count = 0;
+  const flag = (msg) => {
+    count++;
+    if (detailed.length < MAX_REPORT) detailed.push(msg);
+  };
+  const walk = async (s, d) => {
+    let entries;
+    try {
+      entries = await fsp.readdir(s, { withFileTypes: true });
+    } catch (e) {
+      return;
+    }
+    for (const ent of entries) {
+      const sp = path.join(s, ent.name);
+      if (shouldSkip && shouldSkip(sp)) continue;
+      const dp = path.join(d, ent.name);
+      if (ent.isDirectory()) {
+        await walk(sp, dp);
+      } else if (ent.isFile() || ent.isSymbolicLink()) {
+        checked++;
+        let ss;
+        try {
+          ss = await fsp.stat(sp);
+        } catch (e) {
+          continue;
+        }
+        let ds;
+        try {
+          ds = await fsp.stat(dp);
+        } catch (e) {
+          flag(`falta en el destino: ${path.relative(src, sp)}`);
+          continue;
+        }
+        if (ss.size !== ds.size) {
+          flag(`tamano distinto: ${path.relative(src, sp)} (${ss.size} vs ${ds.size} bytes)`);
+        }
+      }
+    }
+  };
+  await walk(src, dest);
+  return { checked, count, mismatches: detailed };
+}
+
 /* ------------------------------------------------------------------ */
 /* CLI                                                                 */
 /* ------------------------------------------------------------------ */
@@ -345,67 +397,94 @@ async function main() {
   console.log(`[vault-backup] ${perDest} archivos por destino (total ${total}).`);
   writeStatus({ phase: "copying", status: "Iniciando copia...", total, copied: 0, file: "" });
 
-  let copiedTotal = 0;
-  let okCount = 0;
+  // Copia en PARALELO (igual que el plugin): cada destino suele estar en su
+  // propio disco, asi que copiar a la vez ahorra tiempo. El panel del plugin
+  // muestra UN solo progreso agregado, asi que sumamos lo copiado por cada
+  // destino en cada repintado. Leer el mismo origen a la vez es seguro y las
+  // escrituras van a carpetas distintas, sin conflicto.
   const errors = [];
   let lastPaint = 0;
+  const copiedByDest = new Array(validDests.length).fill(0);
+  const okFlags = new Array(validDests.length).fill(false);
+  const verifyFails = []; // destinos copiados pero con discrepancias al verificar
 
-  for (let i = 0; i < validDests.length; i++) {
-    const destRoot = validDests[i];
-    const label = `destino ${i + 1}/${validDests.length}`;
-    try {
-      fs.mkdirSync(destRoot, { recursive: true });
-      const folderName = computeBackupFolderName(destRoot);
-      const targetDir = path.join(destRoot, folderName, vaultName);
-      console.log(`[vault-backup] Copiando a ${label}: "${folderName}" -> ${destRoot}`);
-      writeStatus({
-        phase: "copying",
-        status: `Copiando a ${label}: "${folderName}"`,
-        total,
-        copied: copiedTotal,
-        file: "",
-      });
+  const paintAggregate = (file) => {
+    const done = copiedByDest.reduce((a, b) => a + b, 0);
+    const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+    process.stdout.write(`\r[vault-backup] ${done} / ${total} archivos (${pct}%)   `);
+    writeStatus({
+      phase: "copying",
+      status: `Copiando ${validDests.length} destino(s) en paralelo...`,
+      total,
+      copied: done,
+      file: file || "",
+    });
+  };
 
-      const base = copiedTotal;
-      const ctx = {
-        copied: 0,
-        onProgress: (copied, srcPath) => {
-          const now = Date.now();
-          if (now - lastPaint < 250) return;
-          lastPaint = now;
-          const done = base + copied;
-          const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
-          process.stdout.write(`\r[vault-backup] ${done} / ${total} archivos (${pct}%)   `);
-          writeStatus({
-            phase: "copying",
-            status: `Copiando a ${label}: "${folderName}"`,
-            total,
-            copied: done,
-            file: path.relative(basePath, srcPath),
-          });
-        },
-      };
-      await copyDir(basePath, targetDir, skip, ctx);
-      copiedTotal += ctx.copied;
-      okCount++;
-      process.stdout.write("\n");
-      console.log(`[vault-backup] OK "${folderName}": ${ctx.copied} archivos`);
-    } catch (e) {
-      process.stdout.write("\n");
-      console.error(`[vault-backup] ERROR copiando a ${destRoot}:`, e.message || e);
-      errors.push(`${destRoot}: ${e && e.message ? e.message : e}`);
-    }
-  }
+  await Promise.all(
+    validDests.map(async (destRoot, i) => {
+      const label = `destino ${i + 1}/${validDests.length}`;
+      try {
+        fs.mkdirSync(destRoot, { recursive: true });
+        const folderName = computeBackupFolderName(destRoot);
+        const targetDir = path.join(destRoot, folderName, vaultName);
+        console.log(`[vault-backup] Copiando a ${label}: "${folderName}" -> ${destRoot}`);
+
+        const ctx = {
+          copied: 0,
+          onProgress: (copied, srcPath) => {
+            copiedByDest[i] = copied;
+            const now = Date.now();
+            if (now - lastPaint < 250) return;
+            lastPaint = now;
+            paintAggregate(path.relative(basePath, srcPath));
+          },
+        };
+        await copyDir(basePath, targetDir, skip, ctx);
+        copiedByDest[i] = ctx.copied;
+        okFlags[i] = true;
+
+        // Verificacion barata (recuento + tamano) de este destino.
+        const v = await verifyCopy(basePath, targetDir, skip);
+        if (v.count === 0) {
+          console.log(
+            `\n[vault-backup] OK "${folderName}" (${label}): ${ctx.copied} archivos, verificado (${v.checked})`
+          );
+        } else {
+          verifyFails.push(`${destRoot}: ${v.count} discrepancia(s)`);
+          console.warn(
+            `\n[vault-backup] AVISO verificacion "${folderName}" (${label}): ${v.count} discrepancia(s):\n  ` +
+              v.mismatches.join("\n  ")
+          );
+        }
+      } catch (e) {
+        console.error(`\n[vault-backup] ERROR copiando a ${destRoot}:`, e.message || e);
+        errors.push(`${destRoot}: ${e && e.message ? e.message : e}`);
+      }
+    })
+  );
+
+  const okCount = okFlags.filter(Boolean).length;
+  const copiedTotal = copiedByDest.reduce((a, b) => a + b, 0);
+  process.stdout.write("\n");
 
   const secs = ((Date.now() - started) / 1000).toFixed(1);
-  if (errors.length === 0) {
-    const msg = `Copia completada en ${okCount} destino(s): ${copiedTotal} archivos en ${secs}s`;
+  if (errors.length === 0 && verifyFails.length === 0) {
+    const msg = `Copia completada y verificada en ${okCount} destino(s): ${copiedTotal} archivos en ${secs}s`;
     console.log(`[vault-backup] ${msg}`);
     writeStatus({ phase: "done", status: msg, total, copied: copiedTotal, file: "" });
     return 0;
   }
+  if (errors.length === 0) {
+    // Se copio todo, pero la verificacion encontro discrepancias en algun destino.
+    const msg = `Copia hecha pero verificacion con discrepancias en ${verifyFails.length} destino(s): ${verifyFails.join(" | ")}`;
+    console.error(`[vault-backup] ${msg}`);
+    writeStatus({ phase: "error", status: msg, total, copied: copiedTotal, file: "" });
+    return 1;
+  }
   if (okCount > 0) {
-    const msg = `Copia parcial: ${okCount} ok, ${errors.length} con error en ${secs}s`;
+    const extra = verifyFails.length ? ` (+${verifyFails.length} con discrepancias al verificar)` : "";
+    const msg = `Copia parcial: ${okCount} ok, ${errors.length} con error en ${secs}s${extra}`;
     console.error(`[vault-backup] ${msg}`);
     writeStatus({ phase: "error", status: msg, total, copied: copiedTotal, file: "" });
     return 1;

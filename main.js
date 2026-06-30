@@ -125,7 +125,8 @@ class VaultBackupPlugin extends obsidian.Plugin {
     this.intervalIds = [];
     this.bottomBtn = null;
     this.statusBtn = null;
-    this.progress = new BackupProgressPanel();
+    // Gestor de la pila de tarjetas de progreso (una por copia en curso).
+    this.progress = new BackupProgressManager();
     // Vigilante del archivo de estado de backup-cli.js (copias por terminal).
     this.cliWatchId = null;
     // startedAt de la copia de terminal que el panel muestra ahora (o null).
@@ -168,7 +169,7 @@ class VaultBackupPlugin extends obsidian.Plugin {
       this.bottomBtn.remove();
       this.bottomBtn = null;
     }
-    if (this.progress) this.progress.hide();
+    if (this.progress) this.progress.hideAll();
   }
 
   /* ----------------------- boton inferior ------------------------ */
@@ -416,6 +417,61 @@ class VaultBackupPlugin extends obsidian.Plugin {
     return ctx.copied;
   }
 
+  // Verificacion barata tras copiar: recorre el origen igual que copyDir y
+  // comprueba que cada archivo existe en el destino con el MISMO tamano
+  // (`stat`, sin releer el contenido, asi que apenas anade coste). Detecta
+  // copias incompletas, archivos truncados o que falten. NO detecta corrupcion
+  // bit a bit silenciosa (eso exigiria releer y hashear todo, ~2x I/O). Devuelve
+  // { checked, count, mismatches } con hasta MAX_REPORT discrepancias descritas.
+  async verifyCopy(src, dest, shouldSkip) {
+    const MAX_REPORT = 20;
+    const detailed = [];
+    let checked = 0;
+    let count = 0;
+    const flag = (msg) => {
+      count++;
+      if (detailed.length < MAX_REPORT) detailed.push(msg);
+    };
+    const walk = async (s, d) => {
+      let entries;
+      try {
+        entries = await fsp.readdir(s, { withFileTypes: true });
+      } catch (e) {
+        return; // el origen pudo cambiar entre copia y verificacion; no es cosa nuestra
+      }
+      for (const ent of entries) {
+        const sp = path.join(s, ent.name);
+        if (shouldSkip && shouldSkip(sp)) continue;
+        const dp = path.join(d, ent.name);
+        if (ent.isDirectory()) {
+          await walk(sp, dp);
+        } else if (ent.isFile() || ent.isSymbolicLink()) {
+          checked++;
+          let ss;
+          try {
+            ss = await fsp.stat(sp);
+          } catch (e) {
+            continue; // el archivo de origen desaparecio tras copiarse; lo ignoramos
+          }
+          let ds;
+          try {
+            ds = await fsp.stat(dp);
+          } catch (e) {
+            flag(`falta en el destino: ${path.relative(src, sp)}`);
+            continue;
+          }
+          if (ss.size !== ds.size) {
+            flag(
+              `tamano distinto: ${path.relative(src, sp)} (${ss.size} vs ${ds.size} bytes)`
+            );
+          }
+        }
+      }
+    };
+    await walk(src, dest);
+    return { checked, count, mismatches: detailed };
+  }
+
   // trigger: "manual" | "auto". onlyPaths (opcional): si se pasa, solo se copia
   // a esas rutas (lo usa cada temporizador para copiar a su propio destino). Sin
   // onlyPaths se copia a todos los destinos configurados.
@@ -489,7 +545,7 @@ class VaultBackupPlugin extends obsidian.Plugin {
 
     this.isBackingUp = true;
     const started = Date.now();
-    const panel = this.progress;
+    const mgr = this.progress;
     try {
       const vaultName = path.basename(basePath);
 
@@ -510,60 +566,105 @@ class VaultBackupPlugin extends obsidian.Plugin {
         excluded.some((ex) => isInside(ex, absPath)) ||
         (cliStatusNorm !== null && normForCompare(absPath) === cliStatusNorm);
 
-      panel.show();
-      panel.setStatus("Preparando copia...");
-      panel.setProgress(0, "");
+      // Una tarjeta de progreso por destino, creada ya (antes de contar) para
+      // dar feedback inmediato. La id "dest-N" reutiliza la misma tarjeta entre
+      // copias sucesivas a ese destino.
+      const panels = validDests.map((destRoot, i) => {
+        const panel = mgr.panel("dest-" + i);
+        panel.show();
+        panel.setTitle(`Destino ${i + 1}`);
+        panel.setDest(destRoot);
+        panel.setStatus("Preparando copia...");
+        panel.setProgress(0, "");
+        return panel;
+      });
 
-      // Mismos archivos en cada destino: total global = por copia x destinos.
+      // Mismos archivos en cada destino: cada tarjeta muestra su propio total.
       const perDest = await this.countFiles(basePath, skip);
-      panel.setTotal(perDest * validDests.length);
+      panels.forEach((p) => p.setTotal(perDest));
 
-      let copiedTotal = 0;
-      let okCount = 0;
-      const errors = [];
+      // Copia en PARALELO: cada destino esta en su propio disco, asi que copiar
+      // a todos a la vez (en vez de uno tras otro) ahorra tiempo. Leer el mismo
+      // origen desde varias copias simultaneas es seguro; las escrituras van a
+      // carpetas distintas, asi que no hay conflicto. Cada destino reporta su
+      // avance en su propia tarjeta y captura su propio error sin tumbar a los
+      // demas.
+      const results = await Promise.all(
+        validDests.map(async (destRoot, i) => {
+          const panel = panels[i];
+          try {
+            fs.mkdirSync(destRoot, { recursive: true });
+            const folderName = this.computeBackupFolderName(destRoot);
+            const targetDir = path.join(destRoot, folderName, vaultName);
+            panel.setStatus(`Copiando "${folderName}"...`);
+            const ctx = {
+              copied: 0,
+              onProgress: (copied, srcPath) =>
+                panel.setProgress(copied, path.relative(basePath, srcPath)),
+            };
+            await this.copyDir(basePath, targetDir, skip, ctx);
+            // Repintado FINAL forzado: el contador debe mostrar el total exacto,
+            // no quedarse unos archivos corto por el throttle de repintado.
+            panel.setProgress(ctx.copied, "", true);
 
-      for (let i = 0; i < validDests.length; i++) {
-        const destRoot = validDests[i];
-        const label = `destino ${i + 1}/${validDests.length}`;
-        try {
-          fs.mkdirSync(destRoot, { recursive: true });
-          const folderName = this.computeBackupFolderName(destRoot);
-          const targetDir = path.join(destRoot, folderName, vaultName);
-          panel.setStatus(`Copiando a ${label}: "${folderName}"...`);
+            // Verificacion barata (recuento + tamano) antes de dar por buena la
+            // copia de este destino.
+            panel.setStatus("Verificando copia...");
+            const v = await this.verifyCopy(basePath, targetDir, skip);
+            const secs = ((Date.now() - started) / 1000).toFixed(1);
+            if (v.count === 0) {
+              panel.setDone(`Verificado: ${ctx.copied} archivos en ${secs}s`);
+              console.log(
+                `[vault-backup] copia "${folderName}" -> ${destRoot}: ${ctx.copied} archivos, verificado (${v.checked})`
+              );
+              return { ok: true, copied: ctx.copied, verified: true };
+            }
+            panel.setError(
+              `Copiado, pero la verificacion encontro ${v.count} discrepancia(s)`
+            );
+            console.warn(
+              `[vault-backup] verificacion de "${destRoot}": ${v.count} discrepancia(s):\n  ` +
+                v.mismatches.join("\n  ")
+            );
+            return { ok: true, copied: ctx.copied, verified: false, verifyCount: v.count };
+          } catch (e) {
+            console.error(`[vault-backup] error copiando a ${destRoot}:`, e);
+            const msg = e && e.message ? e.message : String(e);
+            panel.setError(`Error: ${msg}`);
+            return { ok: false, error: `${destRoot}: ${msg}` };
+          }
+        })
+      );
 
-          const base = copiedTotal;
-          const ctx = {
-            copied: 0,
-            onProgress: (copied, srcPath) =>
-              panel.setProgress(base + copied, path.relative(basePath, srcPath)),
-          };
-          await this.copyDir(basePath, targetDir, skip, ctx);
-          copiedTotal += ctx.copied;
-          okCount++;
-          console.log(
-            `[vault-backup] copia "${folderName}" -> ${destRoot}: ${ctx.copied} archivos`
-          );
-        } catch (e) {
-          console.error(`[vault-backup] error copiando a ${destRoot}:`, e);
-          errors.push(`${destRoot}: ${e && e.message ? e.message : e}`);
-        }
-      }
-
+      const okCount = results.filter((r) => r.ok).length;
+      const copyErrors = results.filter((r) => !r.ok).map((r) => r.error);
+      const verifyIssues = results.filter((r) => r.ok && r.verified === false);
+      const copiedTotal = results.reduce((n, r) => n + (r.copied || 0), 0);
       const secs = ((Date.now() - started) / 1000).toFixed(1);
-      if (errors.length === 0) {
-        panel.setDone(
-          `Copia completada en ${okCount} destino(s): ${copiedTotal} archivos en ${secs}s`
-        );
-      } else if (okCount > 0) {
-        panel.setError(
-          `Copia parcial: ${okCount} ok, ${errors.length} con error. ${errors.join(" | ")}`
-        );
-      } else {
-        panel.setError(`Error en todos los destinos: ${errors.join(" | ")}`);
+
+      // Resumen global solo en copia manual (la automatica no molesta con avisos).
+      if (trigger === "manual") {
+        if (copyErrors.length === 0 && verifyIssues.length === 0) {
+          new obsidian.Notice(
+            `Copia completada y verificada en ${okCount} destino(s): ${copiedTotal} archivos en ${secs}s`
+          );
+        } else if (copyErrors.length === 0) {
+          new obsidian.Notice(
+            `Copia hecha, pero la verificacion fallo en ${verifyIssues.length} destino(s). Revisa el panel.`
+          );
+        } else if (okCount > 0) {
+          new obsidian.Notice(
+            `Copia parcial: ${okCount} ok, ${copyErrors.length} con error.`
+          );
+        } else {
+          new obsidian.Notice(`Error en la copia: ${copyErrors.join(" | ")}`);
+        }
       }
     } catch (e) {
       console.error("[vault-backup] error en la copia:", e);
-      panel.setError(`Error: ${e && e.message ? e.message : e}`);
+      if (trigger === "manual") {
+        new obsidian.Notice(`Error en la copia: ${e && e.message ? e.message : e}`);
+      }
     } finally {
       this.isBackingUp = false;
     }
@@ -617,7 +718,11 @@ class VaultBackupPlugin extends obsidian.Plugin {
       Date.now(),
       this.cliShownFor
     );
-    const panel = this.progress;
+    // En ticks inactivos no tocamos el gestor (evita crear una tarjeta "cli"
+    // vacia que dejaria la pila sin vaciarse nunca).
+    if (decision.action === "none") return;
+    // La copia desde terminal usa una unica tarjeta agregada ("cli").
+    const panel = this.progress.panel("cli");
     switch (decision.action) {
       case "hide":
         panel.hide();
@@ -626,6 +731,8 @@ class VaultBackupPlugin extends obsidian.Plugin {
       case "progress":
         if (decision.isNew) {
           panel.show();
+          panel.setTitle("Copia desde terminal");
+          panel.setDest("");
           this.cliShownFor = decision.startedAt;
         }
         panel.setTotal(decision.total);
@@ -636,11 +743,18 @@ class VaultBackupPlugin extends obsidian.Plugin {
       case "finalize-error":
         if (decision.isNew) {
           panel.show();
+          panel.setTitle("Copia desde terminal");
+          panel.setDest("");
           this.cliShownFor = decision.startedAt;
         }
         panel.setTotal(decision.total);
-        if (decision.action === "finalize-done") panel.setDone(decision.text);
-        else panel.setError(decision.text);
+        if (decision.action === "finalize-done") {
+          // Repintado final forzado para que el contador llegue al total.
+          panel.setProgress(decision.total, "", true);
+          panel.setDone(decision.text);
+        } else {
+          panel.setError(decision.text);
+        }
         this.cliShownFor = null;
         // Consumido: borramos el archivo para no volver a procesarlo.
         this.cleanupCliStatus();
@@ -652,12 +766,59 @@ class VaultBackupPlugin extends obsidian.Plugin {
 }
 
 /* ------------------------------------------------------------------ */
-/* Panel de progreso flotante (esquina inferior izquierda)            */
+/* Pila de tarjetas de progreso (esquina inferior izquierda)          */
 /* ------------------------------------------------------------------ */
 
-class BackupProgressPanel {
+// Gestiona una pila de tarjetas apiladas en la esquina inferior izquierda: una
+// por copia en curso (un destino del plugin, o la copia desde terminal). Crea
+// el contenedor cuando hace falta y lo retira cuando ya no queda ninguna.
+class BackupProgressManager {
   constructor() {
+    this.stackEl = null;
+    this.panels = new Map(); // id -> BackupProgressPanel
+  }
+
+  ensureStack() {
+    if (this.stackEl && this.stackEl.isConnected) return this.stackEl;
+    this.stackEl = document.body.createDiv({ cls: "vault-backup-stack" });
+    return this.stackEl;
+  }
+
+  // Devuelve la tarjeta de un id dado (la crea si no existe). La id agrupa la
+  // copia: "dest-0", "dest-1"... para el plugin; "cli" para la copia desde
+  // terminal.
+  panel(id) {
+    let p = this.panels.get(id);
+    if (!p) {
+      p = new BackupProgressPanel(this, id);
+      this.panels.set(id, p);
+    }
+    return p;
+  }
+
+  // La tarjeta avisa al ocultarse para que la olvidemos y, si no queda
+  // ninguna visible, retiremos el contenedor de la pila.
+  notifyHidden(id) {
+    this.panels.delete(id);
+    if (this.panels.size === 0 && this.stackEl) {
+      this.stackEl.remove();
+      this.stackEl = null;
+    }
+  }
+
+  hideAll() {
+    for (const p of Array.from(this.panels.values())) p.hide();
+  }
+}
+
+// Una tarjeta de progreso individual dentro de la pila.
+class BackupProgressPanel {
+  constructor(manager, id) {
+    this.manager = manager || null;
+    this.id = id != null ? id : "default";
     this.el = null;
+    this.titleEl = null;
+    this.destEl = null;
     this.statusEl = null;
     this.barEl = null;
     this.countEl = null;
@@ -673,14 +834,19 @@ class BackupProgressPanel {
       window.clearTimeout(this.hideTimer);
       this.hideTimer = null;
     }
-    const el = document.body.createDiv({ cls: "vault-backup-panel" });
+    const parent = this.manager ? this.manager.ensureStack() : document.body;
+    const el = parent.createDiv({ cls: "vault-backup-panel" });
 
     const header = el.createDiv({ cls: "vault-backup-panel-header" });
-    header.createSpan({ cls: "vault-backup-panel-title", text: "Copia de seguridad" });
+    this.titleEl = header.createSpan({
+      cls: "vault-backup-panel-title",
+      text: "Copia de seguridad",
+    });
     const close = header.createSpan({ cls: "vault-backup-panel-close", text: "×" });
     close.setAttr("aria-label", "Cerrar");
     close.addEventListener("click", () => this.hide());
 
+    this.destEl = el.createDiv({ cls: "vault-backup-dest", text: "" });
     this.statusEl = el.createDiv({ cls: "vault-backup-status", text: "" });
 
     const barWrap = el.createDiv({ cls: "vault-backup-bar-wrap" });
@@ -698,6 +864,20 @@ class BackupProgressPanel {
     this.el.removeClass("vault-backup-error");
   }
 
+  // Titulo de la tarjeta (p.ej. "Destino 1" o "Copia desde terminal").
+  setTitle(text) {
+    this.ensure();
+    if (this.titleEl) this.titleEl.setText(text || "Copia de seguridad");
+  }
+
+  // Linea con la ruta del destino. Vacia para la copia desde terminal.
+  setDest(text) {
+    if (!this.destEl) return;
+    this.destEl.setText(text || "");
+    if (text) this.destEl.setAttr("aria-label", text);
+    this.destEl.toggleClass("vault-backup-dest-hidden", !text);
+  }
+
   setStatus(text) {
     if (this.statusEl) this.statusEl.setText(text);
   }
@@ -706,11 +886,14 @@ class BackupProgressPanel {
     this.total = n || 0;
   }
 
-  setProgress(copied, relPath) {
+  // force omite el limite de repintado: lo usa la actualizacion FINAL (al
+  // terminar de copiar) para que el contador muestre el total exacto y no se
+  // quede congelado unos archivos antes por el throttle.
+  setProgress(copied, relPath, force) {
     if (!this.el) return;
     const now = Date.now();
-    // Limita los repintados para no saturar la UI.
-    if (now - this.lastPaint < 80) return;
+    // Limita los repintados para no saturar la UI (salvo el final forzado).
+    if (!force && now - this.lastPaint < 80) return;
     this.lastPaint = now;
     const pct = this.total > 0 ? Math.min(100, Math.round((copied / this.total) * 100)) : 0;
     this.barEl.style.width = pct + "%";
@@ -751,6 +934,7 @@ class BackupProgressPanel {
       this.el.remove();
       this.el = null;
     }
+    if (this.manager) this.manager.notifyHidden(this.id);
   }
 }
 
@@ -782,8 +966,8 @@ class VaultBackupSettingTab extends obsidian.PluginSettingTab {
     new obsidian.Setting(containerEl)
       .setName("Carpetas de destino")
       .setDesc(
-        "Anade una o varias rutas. La copia manual se guarda en todas (de forma " +
-          "secuencial). Cada destino puede ademas tener su propia copia automatica."
+        "Anade una o varias rutas. La copia manual se guarda en todas a la vez (en " +
+          "paralelo). Cada destino puede ademas tener su propia copia automatica."
       )
       .setHeading();
 
