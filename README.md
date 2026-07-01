@@ -49,6 +49,16 @@ equivale a copiar la carpeta del vault desde el explorador y pegarla en otra rut
   archivos que faltan en la copia se muestra su contenido como "anadido". Los
   archivos binarios (imagenes, PDFs, adjuntos) y los muy grandes no se difean: en
   su lugar se indica el tamano de cada version.
+- Desde esa misma ventana de discrepancias puedes **recopiar solo los archivos
+  afectados**, sin relanzar la copia entera: marca con su casilla los que
+  quieras (o "Seleccionar todo") y pulsa **"Recopiar seleccionados"**. Cada
+  archivo se vuelve a copiar del vault a la copia y se **reverifica** al
+  momento; su fila queda marcada en verde si quedo bien o en rojo con el motivo
+  si fallo (los fallidos se pueden reintentar). El contador del boton "Ver
+  discrepancias" de la tarjeta se va actualizando y, si resuelves todas, la
+  tarjeta pasa a estado verificado. Ten en cuenta que se copia la version que
+  hay **ahora** en el vault, no la del momento de la copia original. Funciona
+  tambien con las discrepancias de una copia lanzada desde la terminal.
 - Cada carpeta de destino tiene su **propia copia automatica**: puedes activarla de
   forma independiente y con un **intervalo distinto** para cada destino. Asi puedes,
   por ejemplo, copiar a una ruta cada 30 minutos y a otra cada 6 horas.

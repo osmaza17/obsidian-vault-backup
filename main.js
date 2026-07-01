@@ -233,6 +233,61 @@ function isInside(parent, child) {
   return b.startsWith(a + path.sep.toLowerCase()) || b.startsWith(a + "/");
 }
 
+// Recopia UN archivo con discrepancia: vuelve a copiar `srcAbs` (vault) sobre
+// `destAbs` (copia) y lo reverifica con el mismo criterio barato que verifyCopy
+// (existencia + tamano via `stat`). Copia la version ACTUAL del vault, no la del
+// momento de la copia original. `vaultBase` (opcional) activa la guarda de no
+// escribir nunca dentro del vault (la recopia sigue siendo de solo lectura
+// sobre el origen). Devuelve { ok: true, srcSize, destSize } o
+// { ok: false, reason } con un texto legible. No lanza: todo error vuelve como
+// reason. Lo usa el MismatchesModal ("Recopiar seleccionados") y se exporta
+// para poder probarlo en Node sin Obsidian.
+async function recopyMismatch(m, vaultBase) {
+  if (!m || !m.srcAbs || !m.destAbs) {
+    return { ok: false, reason: "la discrepancia no trae las rutas absolutas" };
+  }
+  if (normForCompare(m.srcAbs) === normForCompare(m.destAbs)) {
+    return { ok: false, reason: "origen y destino son el mismo archivo" };
+  }
+  // Invariante del plugin: sobre el vault solo se LEE. Si el destino cayera
+  // dentro del vault (datos corruptos, rutas mal construidas), no se escribe.
+  if (vaultBase && isInside(vaultBase, m.destAbs)) {
+    return { ok: false, reason: "el destino esta dentro del vault; no se escribe ahi" };
+  }
+  let ss;
+  try {
+    ss = await fsp.stat(m.srcAbs);
+  } catch (e) {
+    return { ok: false, reason: "el archivo ya no existe en el vault" };
+  }
+  if (!ss.isFile()) {
+    return { ok: false, reason: "el origen ya no es un archivo normal" };
+  }
+  try {
+    await fsp.mkdir(path.dirname(m.destAbs), { recursive: true });
+    await fsp.copyFile(m.srcAbs, m.destAbs);
+  } catch (e) {
+    return { ok: false, reason: e && e.message ? e.message : String(e) };
+  }
+  // Reverificacion: releemos AMBOS stat despues de copiar, por si el vault
+  // cambio durante la propia recopia.
+  let ss2;
+  let ds2;
+  try {
+    ss2 = await fsp.stat(m.srcAbs);
+    ds2 = await fsp.stat(m.destAbs);
+  } catch (e) {
+    return { ok: false, reason: "no se pudo reverificar tras copiar" };
+  }
+  if (ss2.size !== ds2.size) {
+    return {
+      ok: false,
+      reason: "sigue difiriendo tras recopiar (el vault pudo cambiar durante la copia)",
+    };
+  }
+  return { ok: true, srcSize: ss2.size, destSize: ds2.size };
+}
+
 // Interpreta el estado que escribe backup-cli.js y decide que hacer con el panel,
 // SIN tocar el DOM (asi se puede probar aislado). Argumentos:
 //   st: objeto leido del archivo de estado, o null si no existe / no se pudo leer.
@@ -307,8 +362,9 @@ class VaultBackupPlugin extends obsidian.Plugin {
     this.statusBtn = null;
     // Gestor de la pila de tarjetas de progreso (una por copia en curso).
     // Le pasamos la app para que las tarjetas puedan abrir el modal de
-    // discrepancias cuando la verificacion falla.
-    this.progress = new BackupProgressManager(this.app);
+    // discrepancias cuando la verificacion falla, y el propio plugin para que
+    // el modal pueda recopiar archivos (guarda de solape y raiz del vault).
+    this.progress = new BackupProgressManager(this.app, this);
     // Vigilante del archivo de estado de backup-cli.js (copias por terminal).
     this.cliWatchId = null;
     // startedAt de la copia de terminal que el panel muestra ahora (o null).
@@ -975,8 +1031,11 @@ class VaultBackupPlugin extends obsidian.Plugin {
 // por copia en curso (un destino del plugin, o la copia desde terminal). Crea
 // el contenedor cuando hace falta y lo retira cuando ya no queda ninguna.
 class BackupProgressManager {
-  constructor(app) {
+  constructor(app, plugin) {
     this.app = app || null;
+    // Referencia al plugin (puede ser null en pruebas): la usa el modal de
+    // discrepancias para la recopia (guarda isBackingUp y raiz del vault).
+    this.plugin = plugin || null;
     this.stackEl = null;
     this.panels = new Map(); // id -> BackupProgressPanel
   }
@@ -1153,10 +1212,35 @@ class BackupProgressPanel {
           checked: this.mismatchInfo.checked,
           count: this.mismatchCount,
           mismatches: this.mismatches,
+          // Para la recopia: guarda de solape y raiz del vault.
+          plugin: this.manager ? this.manager.plugin : null,
+          // El modal avisa por cada discrepancia recopiada y verificada, para
+          // que la tarjeta actualice su contador (y su estado si llega a cero).
+          onResolved: (m) => this.resolveMismatch(m),
         }).open();
       });
     }
     this.mismatchBtnEl.setText(`Ver discrepancias (${this.mismatchCount})`);
+  }
+
+  // Una discrepancia quedo resuelta (recopiada y verificada desde el modal):
+  // la quitamos de la lista y actualizamos el contador del boton. Si ya no
+  // queda ninguna, la tarjeta pasa de error a verificada.
+  resolveMismatch(m) {
+    const i = this.mismatches.indexOf(m);
+    if (i >= 0) this.mismatches.splice(i, 1);
+    if (this.mismatchCount > 0) this.mismatchCount--;
+    // La tarjeta pudo cerrarse mientras el modal seguia abierto.
+    if (!this.el || !this.el.isConnected) return;
+    if (this.mismatchCount <= 0) {
+      this.clearMismatches();
+      this.el.removeClass("vault-backup-error");
+      this.el.addClass("vault-backup-done");
+      this.setStatus("Discrepancias resueltas: copia verificada");
+      this.scheduleHide(6000);
+    } else if (this.mismatchBtnEl) {
+      this.mismatchBtnEl.setText(`Ver discrepancias (${this.mismatchCount})`);
+    }
   }
 
   // Quita el boton de discrepancias (al reutilizar la tarjeta en una copia nueva).
@@ -1209,10 +1293,20 @@ class MismatchesModal extends obsidian.Modal {
     this.checked = i.checked;
     this.mismatches = Array.isArray(i.mismatches) ? i.mismatches : [];
     this.count = i.count || this.mismatches.length;
+    // Para la recopia selectiva ("Recopiar seleccionados").
+    this.plugin = i.plugin || null;
+    this.onResolved = typeof i.onResolved === "function" ? i.onResolved : null;
+    // Una entrada por fila pintada: { m, li, checkbox, stateEl, resolved }.
+    this.rows = [];
+    this.busy = false;
+    this.recopyBtnEl = null;
+    this.selectAllEl = null;
+    this.recopyStatusEl = null;
   }
 
   onOpen() {
     const { contentEl, titleEl } = this;
+    this.rows = [];
     this.modalEl.addClass("vault-backup-mismatch-modal");
     titleEl.setText("Discrepancias en la verificacion");
 
@@ -1288,14 +1382,156 @@ class MismatchesModal extends obsidian.Modal {
       });
     }
 
+    // --- Recopiar seleccionados ---
+    // Solo si alguna fila es recopiable (trae rutas absolutas).
+    if (this.rows.some((r) => r.checkbox)) {
+      const bar = contentEl.createDiv({ cls: "vault-backup-recopy-bar" });
+      bar.createEl("p", {
+        cls: "vault-backup-recopy-note",
+        text:
+          "Puedes recopiar solo los archivos marcados: cada uno se vuelve a " +
+          "copiar del vault a la copia y se reverifica. Ojo: se copia la " +
+          "version que hay AHORA en el vault, no la del momento de la copia " +
+          "original.",
+      });
+      const controls = bar.createDiv({ cls: "vault-backup-recopy-controls" });
+      const allLabel = controls.createEl("label", {
+        cls: "vault-backup-recopy-all",
+      });
+      this.selectAllEl = allLabel.createEl("input", {
+        attr: { type: "checkbox", "aria-label": "Seleccionar todos los archivos" },
+      });
+      allLabel.appendText("Seleccionar todo");
+      this.selectAllEl.addEventListener("change", () => {
+        const on = this.selectAllEl.checked;
+        for (const r of this.rows) {
+          if (r.checkbox && !r.checkbox.disabled) r.checkbox.checked = on;
+        }
+        this.updateRecopyUi();
+      });
+      this.recopyBtnEl = controls.createEl("button", {
+        cls: "vault-backup-recopy-btn",
+        text: "Recopiar seleccionados",
+      });
+      this.recopyBtnEl.disabled = true;
+      this.recopyBtnEl.addEventListener("click", () => {
+        this.runRecopy();
+      });
+      this.recopyStatusEl = bar.createDiv({ cls: "vault-backup-recopy-summary" });
+    }
+
     // --- Que hacer ---
     contentEl.createEl("p", {
       cls: "vault-backup-mismatch-hint",
       text:
-        "Sugerencia: vuelve a lanzar la copia. Si el problema persiste, comprueba " +
-        "que el disco de destino tenga espacio libre y no este protegido contra " +
-        "escritura. Las copias anteriores no se tocan.",
+        "Sugerencia: recopia los archivos marcados o vuelve a lanzar la copia " +
+        "entera. Si el problema persiste, comprueba que el disco de destino " +
+        "tenga espacio libre y no este protegido contra escritura. Las copias " +
+        "anteriores no se tocan.",
     });
+  }
+
+  // Filas marcadas y todavia pendientes (las ya resueltas no se recopian otra vez).
+  selectedRows() {
+    return this.rows.filter(
+      (r) => r.checkbox && r.checkbox.checked && !r.resolved
+    );
+  }
+
+  // Habilita/deshabilita el boton de recopia segun la seleccion (y muestra
+  // cuantos archivos hay marcados). Durante una recopia en curso no toca el
+  // texto (el boton muestra el progreso "Recopiando i de n...").
+  updateRecopyUi() {
+    if (!this.recopyBtnEl) return;
+    const n = this.selectedRows().length;
+    this.recopyBtnEl.disabled = this.busy || n === 0;
+    if (this.busy) return;
+    this.recopyBtnEl.setText(
+      n > 0 ? `Recopiar seleccionados (${n})` : "Recopiar seleccionados"
+    );
+  }
+
+  // Recopia los archivos marcados UNO A UNO (son pocos; asi el progreso por
+  // fila es claro y un fallo no interrumpe al resto). Cada exito avisa a la
+  // tarjeta via onResolved; cada fallo queda anotado en su fila y se puede
+  // reintentar. Sigue hasta el final aunque el modal se cierre a mitad (la
+  // reparacion pedida se completa y el Notice final resume el resultado).
+  async runRecopy() {
+    if (this.busy) return;
+    const rows = this.selectedRows();
+    if (!rows.length) return;
+    // Guarda de solape con las copias del propio plugin, en ambos sentidos:
+    // ni recopiar mientras hay una copia en curso, ni dejar que arranque una
+    // copia (manual o automatica) a mitad de la recopia.
+    if (this.plugin && this.plugin.isBackingUp) {
+      new obsidian.Notice(
+        "Hay una copia de seguridad en curso. Espera a que termine para recopiar."
+      );
+      return;
+    }
+    this.busy = true;
+    if (this.plugin) this.plugin.isBackingUp = true;
+    const vaultBase = this.plugin ? this.plugin.getVaultBasePath() : null;
+    let okCount = 0;
+    let failCount = 0;
+    try {
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        if (this.recopyBtnEl) {
+          this.recopyBtnEl.disabled = true;
+          this.recopyBtnEl.setText(`Recopiando ${i + 1} de ${rows.length}...`);
+        }
+        r.li.removeClass("vault-backup-recopy-failed");
+        r.stateEl.setText("Recopiando...");
+        let res;
+        try {
+          res = await recopyMismatch(r.m, vaultBase);
+        } catch (e) {
+          // recopyMismatch no deberia lanzar, pero un fallo aqui no debe
+          // dejar isBackingUp bloqueado ni parar el resto de archivos.
+          res = { ok: false, reason: e && e.message ? e.message : String(e) };
+        }
+        if (res.ok) {
+          okCount++;
+          r.resolved = true;
+          r.li.addClass("vault-backup-recopy-ok");
+          if (r.checkbox) {
+            r.checkbox.checked = false;
+            r.checkbox.disabled = true;
+          }
+          r.stateEl.setText(
+            `Recopiado y verificado (${formatBytes(res.destSize)}).`
+          );
+          if (this.onResolved) {
+            try {
+              this.onResolved(r.m);
+            } catch (e) {
+              // La tarjeta pudo cerrarse mientras tanto; no afecta a la recopia.
+            }
+          }
+        } else {
+          failCount++;
+          r.li.addClass("vault-backup-recopy-failed");
+          r.stateEl.setText(`No se pudo recopiar: ${res.reason}`);
+        }
+      }
+    } finally {
+      if (this.plugin) this.plugin.isBackingUp = false;
+      this.busy = false;
+    }
+    if (this.recopyStatusEl) {
+      this.recopyStatusEl.setText(
+        failCount === 0
+          ? `Recopiados y verificados ${okCount} archivo(s).`
+          : `Recopiados ${okCount}, con error ${failCount}. Los fallidos siguen marcados: puedes reintentar.`
+      );
+    }
+    this.updateRecopyUi();
+    new obsidian.Notice(
+      failCount === 0
+        ? `Recopia completada: ${okCount} archivo(s) verificados.`
+        : `Recopia: ${okCount} ok, ${failCount} con error.`
+    );
   }
 
   // Pinta una fila: etiqueta de destino (solo en copias desde terminal, que
@@ -1305,6 +1541,16 @@ class MismatchesModal extends obsidian.Modal {
     const li = list.createEl("li", { cls: "vault-backup-mismatch-item" });
 
     const head = li.createDiv({ cls: "vault-backup-mismatch-item-head" });
+    // Checkbox para marcar este archivo y recopiarlo. Solo si la discrepancia
+    // trae las rutas absolutas; sin ellas no hay nada que recopiar.
+    let checkbox = null;
+    if (m.srcAbs && m.destAbs) {
+      checkbox = head.createEl("input", {
+        cls: "vault-backup-recopy-check",
+        attr: { type: "checkbox", "aria-label": "Marcar para recopiar" },
+      });
+      checkbox.addEventListener("change", () => this.updateRecopyUi());
+    }
     if (m.label) {
       head.createSpan({ cls: "vault-backup-mismatch-tag", text: m.label });
     }
@@ -1331,6 +1577,11 @@ class MismatchesModal extends obsidian.Modal {
     }
 
     this.addDiffButton(li, m);
+
+    // Linea de estado de la recopia de esta fila (oculta mientras este vacia,
+    // via CSS :empty).
+    const stateEl = li.createDiv({ cls: "vault-backup-recopy-state" });
+    this.rows.push({ m, li, checkbox, stateEl, resolved: false });
   }
 
   // Anade un boton "Ver diff" que abre un NUEVO modal (DiffModal) por encima de
@@ -1765,3 +2016,4 @@ module.exports.diffLines = diffLines;
 module.exports.alignDiff = alignDiff;
 module.exports.collapseRows = collapseRows;
 module.exports.looksBinary = looksBinary;
+module.exports.recopyMismatch = recopyMismatch;

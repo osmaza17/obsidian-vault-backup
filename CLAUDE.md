@@ -67,11 +67,24 @@ es el numero de copia hecha ese mismo dia (empezando en 1).
     el boton "Ver discrepancias". Se exporta aparte
     (`module.exports.interpretCliStatus`) solo para poder probarla en Node sin
     Obsidian; no afecta a la carga del plugin.
+  - `recopyMismatch(m, vaultBase)` - recopia UN archivo con discrepancia
+    (`srcAbs` -> `destAbs`) y lo reverifica con el mismo criterio barato que
+    `verifyCopy` (stat + tamano, releyendo ambos stat tras copiar por si el
+    vault cambio durante la recopia). Copia la version ACTUAL del vault. No
+    lanza: devuelve `{ ok: true, srcSize, destSize }` o `{ ok: false, reason }`.
+    Guardas: sin rutas absolutas, origen == destino, destino dentro del vault
+    (si se pasa `vaultBase`; preserva el invariante de solo-lectura sobre el
+    vault), origen desaparecido o que ya no es archivo normal. La usa el boton
+    "Recopiar seleccionados" del `MismatchesModal` y se exporta aparte
+    (`module.exports.recopyMismatch`) solo para probarla en Node.
   - `BackupProgressManager` - gestiona una PILA de tarjetas de progreso apiladas en
     la esquina inferior izquierda (contenedor `.vault-backup-stack`). Crea/recupera
     una tarjeta por `id` (`panel(id)`): el plugin usa `dest-0`, `dest-1`... (una por
     destino) y el vigilante del CLI usa `cli` (una sola tarjeta agregada). Retira el
-    contenedor cuando no queda ninguna tarjeta visible (`notifyHidden`).
+    contenedor cuando no queda ninguna tarjeta visible (`notifyHidden`). Guarda
+    tambien una referencia al plugin (`constructor(app, plugin)`) que las tarjetas
+    pasan al `MismatchesModal` para la recopia (guarda `isBackingUp` y raiz del
+    vault).
   - `BackupProgressPanel` - una tarjeta flotante no intrusiva (titulo, ruta del
     destino, estado, barra, recuento, archivo actual) que muestra el progreso en
     vivo sin bloquear Obsidian. `setProgress(copied, rel, force)` limita los
@@ -81,16 +94,33 @@ es el numero de copia hecha ese mismo dia (empezando en 1).
     (varias a la vez, una por destino) como la copia lanzada desde la terminal (una
     sola, via el vigilante). Cuando la verificacion falla, `showMismatches(list,
     count, info)` anade un boton "Ver discrepancias" que abre el `MismatchesModal`
-    (info opcional: `{ checked, destPath }` para el contexto); `clearMismatches()`
-    lo retira al reutilizar la tarjeta en una copia nueva.
+    (info opcional: `{ checked, destPath }` para el contexto; pasa tambien el
+    plugin y un callback `onResolved`); `clearMismatches()` lo retira al
+    reutilizar la tarjeta en una copia nueva. `resolveMismatch(m)` (lo llama el
+    modal por cada archivo recopiado y verificado) quita esa discrepancia de la
+    lista y actualiza el contador del boton; si llegan a cero, la tarjeta pasa
+    de error a verificada y se auto-oculta. Tolera que la tarjeta ya este
+    cerrada.
   - `MismatchesModal` - modal centrado (`obsidian.Modal`) con contexto de la
     verificacion fallida: nombre y ruta del destino, cuantos archivos se
     verificaron, y la lista de discrepancias AGRUPADA por tipo ("Faltan en la
     copia" / "Tamano distinto") con tamanos legibles (`formatBytes`), que significa
     una discrepancia y que hacer. Recibe `{ title, destPath, checked, count,
-    mismatches }`. En copias desde terminal cada discrepancia lleva `label` con el
-    destino al que pertenece. Cada fila (`renderItem`) lleva un boton "Ver diff"
-    (`addDiffButton`) que abre un `DiffModal` POR ENCIMA de este modal.
+    mismatches }` y ademas `{ plugin, onResolved }` para la RECOPIA selectiva. En
+    copias desde terminal cada discrepancia lleva `label` con el destino al que
+    pertenece. Cada fila (`renderItem`) lleva un boton "Ver diff"
+    (`addDiffButton`) que abre un `DiffModal` POR ENCIMA de este modal, y (si la
+    discrepancia trae rutas absolutas) un CHECKBOX para marcarla. Al pie, una
+    barra (`.vault-backup-recopy-bar`) con "Seleccionar todo" y el boton
+    "Recopiar seleccionados" (`runRecopy`): recopia los archivos marcados UNO A
+    UNO con `recopyMismatch` (asi un fallo no interrumpe al resto), pinta el
+    resultado en la linea de estado de cada fila (verde recopiado/reverificado,
+    rojo con el motivo si fallo; los fallidos se pueden reintentar) y avisa a la
+    tarjeta via `onResolved` por cada exito. Guarda de solape en ambos sentidos:
+    no recopia si `plugin.isBackingUp` y pone `isBackingUp = true` mientras dura
+    (restaurado en `finally`). Si el modal se cierra a mitad, la recopia en
+    curso se completa igual y el `Notice` final resume el resultado. Avisa de
+    que se copia la version ACTUAL del vault, no la del momento de la copia.
   - `DiffModal` - modal GRANDE (`obsidian.Modal`, casi a pantalla completa:
     `width: min(1800px, 98vw)`, `height: 94vh`, en flex-column para que la tabla
     ocupe todo el alto) que se abre sobre el de discrepancias y muestra la
@@ -148,14 +178,18 @@ es el numero de copia hecha ese mismo dia (empezando en 1).
 - `test/` - pruebas en Node plano (sin dependencias): `test-interpret.js` (funcion
   pura `interpretCliStatus`, con stub de `obsidian`), `test-cli.js` (integracion
   del CLI contra un vault falso temporal), `test-verify.js` (la verificacion
-  `verifyCopy`: detecta faltantes y truncados, no marca una copia fiel) y
+  `verifyCopy`: detecta faltantes y truncados, no marca una copia fiel),
   `test-diff.js` (los ayudantes puros del diff: `diffLines`, `alignDiff`,
-  `collapseRows`, `looksBinary`).
+  `collapseRows`, `looksBinary`) y `test-recopy.js` (la recopia selectiva
+  `recopyMismatch`: repara un truncado y un faltante, y sus guardas).
 - `manifest.json` - metadatos del plugin.
 - `styles.css` - tamano del icono del boton, ancho del campo de ruta en ajustes,
   la pila de tarjetas de progreso (`.vault-backup-stack` + `.vault-backup-panel`),
   el boton/modal de discrepancias (`.vault-backup-mismatch-btn` +
-  `.vault-backup-mismatch-list`) y el modal de diff lado a lado
+  `.vault-backup-mismatch-list`), la recopia selectiva (`.vault-backup-recopy-*`:
+  checkbox por fila, linea de estado por fila con estados ok/failed, barra
+  inferior con "Seleccionar todo" + boton y resumen; las lineas vacias se
+  ocultan via `:empty`) y el modal de diff lado a lado
   (`.vault-backup-diff*`: boton "Ver diff"; modal casi a pantalla completa en
   flex-column; barra superior con ruta y leyenda; cabeceras de dos lineas con
   barra de color roja/verde; tabla de dos columnas con separador grueso central
@@ -217,12 +251,20 @@ La UI sobre Electron no se prueba sola, pero la logica si:
   (identico, insercion, borrado, copia vacia, linea cambiada), `alignDiff`
   (empareja del+add en filas lado a lado, deja huecos), `collapseRows` (pliega el
   contexto largo en huecos) y `looksBinary`.
+- `node test/test-recopy.js` - prueba la recopia selectiva `recopyMismatch`:
+  repara un archivo truncado y uno faltante (creando carpetas intermedias) y
+  rechaza origen desaparecido, destino dentro del vault, origen == destino y
+  discrepancias sin rutas absolutas.
 
 A mano en Obsidian (lo que NO se puede automatizar): recargar el plugin, lanzar una
 copia con el boton o `Ctrl+S` y ver el panel. El modal de diff lado a lado tampoco
 se prueba solo: hay que provocar una discrepancia (p. ej. copiar y luego editar un
 archivo de la copia) y abrir "Ver discrepancias" -> "Ver diff" (se abre un segundo
-modal, mas ancho, con la copia a la izquierda y el vault a la derecha). Para el
+modal, mas ancho, con la copia a la izquierda y el vault a la derecha). Para la
+recopia selectiva: con esa misma discrepancia provocada, marcar su checkbox en
+"Ver discrepancias" y pulsar "Recopiar seleccionados"; la fila debe quedar en
+verde ("Recopiado y verificado") y, si se resuelven todas, la tarjeta pasa a
+estado verificado. Para el
 panel de copias desde terminal: con Obsidian abierto y el plugin recargado,
 ejecutar `node backup-cli.js` y comprobar que aparece el mismo panel con el
 progreso.

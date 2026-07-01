@@ -440,6 +440,98 @@
   font-style: italic;
 }
 
+/* Recopia selectiva desde el modal de discrepancias */
+
+/* Checkbox de cada fila para marcarla y recopiarla */
+.vault-backup-recopy-check {
+  flex: 0 0 auto;
+  margin: 0 4px 0 0;
+  cursor: pointer;
+}
+
+/* Linea de estado de la recopia bajo cada fila (oculta mientras este vacia) */
+.vault-backup-recopy-state {
+  margin-top: 3px;
+  font-size: 0.8em;
+  color: var(--text-muted);
+}
+
+.vault-backup-recopy-state:empty {
+  display: none;
+}
+
+/* Fila recopiada y verificada */
+.vault-backup-mismatch-item.vault-backup-recopy-ok {
+  background: rgba(46, 160, 67, 0.1);
+}
+
+.vault-backup-mismatch-item.vault-backup-recopy-ok .vault-backup-recopy-state {
+  color: var(--text-success, #2ea043);
+  font-weight: var(--font-semibold);
+}
+
+/* Fila cuya recopia fallo (se puede reintentar) */
+.vault-backup-mismatch-item.vault-backup-recopy-failed .vault-backup-recopy-state {
+  color: var(--text-error, #e03e3e);
+  font-weight: var(--font-semibold);
+}
+
+/* Barra inferior: aviso + seleccionar todo + boton de recopia */
+.vault-backup-recopy-bar {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.vault-backup-recopy-note {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  margin: 0 0 8px;
+}
+
+.vault-backup-recopy-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.vault-backup-recopy-all {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85em;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.vault-backup-recopy-btn {
+  cursor: pointer;
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--interactive-accent);
+  background: var(--interactive-accent);
+  color: var(--text-on-accent, #fff);
+  font-size: 0.9em;
+  font-weight: var(--font-semibold);
+}
+
+.vault-backup-recopy-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Resumen del resultado de la recopia (oculto mientras este vacio) */
+.vault-backup-recopy-summary {
+  margin-top: 8px;
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+
+.vault-backup-recopy-summary:empty {
+  display: none;
+}
+
 .vault-backup-mismatch-hint {
   margin-top: 12px;
   padding-top: 10px;
