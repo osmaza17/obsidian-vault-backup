@@ -38,7 +38,13 @@ equivale a copiar la carpeta del vault desde el explorador y pegarla en otra rut
   destino y su ruta, cuantos archivos se verificaron, y la lista de archivos
   afectados **agrupada por tipo** (los que faltan y los de distinto tamano), con
   los tamanos en el vault y en la copia, una explicacion de que significa y que
-  hacer.
+  hacer. Ademas, cada archivo de la lista tiene un boton **"Ver diff"** que abre
+  **una segunda ventana** (por encima de la anterior) con una comparacion **estilo
+  GitHub en dos columnas**: a la izquierda la version de la copia y a la derecha la
+  del vault, alineadas linea a linea (anadidas en verde, quitadas en rojo). Para
+  los archivos que faltan en la copia se muestra su contenido como "anadido". Los
+  archivos binarios (imagenes, PDFs, adjuntos) y los muy grandes no se difean: en
+  su lugar se indica el tamano de cada version.
 - Cada carpeta de destino tiene su **propia copia automatica**: puedes activarla de
   forma independiente y con un **intervalo distinto** para cada destino. Asi puedes,
   por ejemplo, copiar a una ruta cada 30 minutos y a otra cada 6 horas.

@@ -244,6 +244,8 @@ async function verifyCopy(src, dest, shouldSkip) {
             rel: path.relative(src, sp),
             srcSize: ss.size,
             destSize: null,
+            srcAbs: sp,
+            destAbs: dp,
           });
           continue;
         }
@@ -253,6 +255,8 @@ async function verifyCopy(src, dest, shouldSkip) {
             rel: path.relative(src, sp),
             srcSize: ss.size,
             destSize: ds.size,
+            srcAbs: sp,
+            destAbs: dp,
           });
         }
       }

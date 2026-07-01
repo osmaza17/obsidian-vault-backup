@@ -37,6 +37,156 @@ function describeMismatch(m) {
   return `${label}tamano distinto: ${m.rel} (vault ${m.srcSize} vs copia ${m.destSize} bytes)`;
 }
 
+/* ------------------------------------------------------------------ */
+/* Diff estilo GitHub para el modal de discrepancias                  */
+/* ------------------------------------------------------------------ */
+
+// Topes para no congelar la UI ni pintar basura al abrir un diff bajo demanda.
+const DIFF_MAX_BYTES = 2 * 1024 * 1024; // no releemos archivos mas grandes que esto
+const DIFF_MAX_LINES = 3000; // tope de lineas por lado para el algoritmo LCS
+const DIFF_CTX = 3; // lineas de contexto sin cambios alrededor de cada cambio
+
+// Heuristica barata: un byte NUL en el arranque delata un binario (imagenes,
+// PDFs, adjuntos). Evita intentar un diff de texto sobre ellos.
+function looksBinary(buf) {
+  const n = Math.min(buf.length, 8000);
+  for (let i = 0; i < n; i++) if (buf[i] === 0) return true;
+  return false;
+}
+
+// Lee un archivo para el diff decidiendo si es apto (texto y no gigante).
+// Devuelve { status: "ok"|"binary"|"toobig"|"missing", size?, text? }.
+async function readForDiff(absPath) {
+  let st;
+  try {
+    st = await fsp.stat(absPath);
+  } catch (e) {
+    return { status: "missing" };
+  }
+  if (st.size > DIFF_MAX_BYTES) return { status: "toobig", size: st.size };
+  let buf;
+  try {
+    buf = await fsp.readFile(absPath);
+  } catch (e) {
+    return { status: "missing" };
+  }
+  if (looksBinary(buf)) return { status: "binary", size: st.size };
+  return { status: "ok", size: st.size, text: buf.toString("utf8") };
+}
+
+// Parte un texto en lineas tolerando cualquier salto de linea (\n, \r\n, \r).
+function splitLines(text) {
+  return text.length ? text.split(/\r\n|\r|\n/) : [];
+}
+
+// Diff de lineas por LCS. Devuelve una lista de operaciones
+// { t: "ctx"|"del"|"add", text }, donde "del" = solo en `oldLines` y
+// "add" = solo en `newLines`. Convencion del modal: old = copia, new = vault.
+function diffLines(oldLines, newLines) {
+  const n = oldLines.length;
+  const m = newLines.length;
+  const w = m + 1;
+  const dp = new Int32Array((n + 1) * w);
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i * w + j] =
+        oldLines[i] === newLines[j]
+          ? dp[(i + 1) * w + (j + 1)] + 1
+          : Math.max(dp[(i + 1) * w + j], dp[i * w + (j + 1)]);
+    }
+  }
+  const ops = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (oldLines[i] === newLines[j]) {
+      ops.push({ t: "ctx", text: oldLines[i] });
+      i++;
+      j++;
+    } else if (dp[(i + 1) * w + j] >= dp[i * w + (j + 1)]) {
+      ops.push({ t: "del", text: oldLines[i] });
+      i++;
+    } else {
+      ops.push({ t: "add", text: newLines[j] });
+      j++;
+    }
+  }
+  while (i < n) ops.push({ t: "del", text: oldLines[i++] });
+  while (j < m) ops.push({ t: "add", text: newLines[j++] });
+  return ops;
+}
+
+// Convierte la lista lineal de ops de diffLines en FILAS para una vista lado a
+// lado (copia a la izquierda, vault a la derecha). Cada fila es
+// { left, right }, donde cada lado es { num, text, kind } o null (hueco). Los
+// bloques de "del"+"add" contiguos se emparejan linea a linea (un cambio), y lo
+// que sobra de un lado deja el otro vacio (null).
+function alignDiff(ops) {
+  const rows = [];
+  let ln = 0; // numero de linea en la copia (old)
+  let rn = 0; // numero de linea en el vault (new)
+  let delBuf = [];
+  let addBuf = [];
+  const flush = () => {
+    const n = Math.max(delBuf.length, addBuf.length);
+    for (let i = 0; i < n; i++) {
+      rows.push({ left: delBuf[i] || null, right: addBuf[i] || null });
+    }
+    delBuf = [];
+    addBuf = [];
+  };
+  for (const op of ops) {
+    if (op.t === "del") {
+      ln++;
+      delBuf.push({ num: ln, text: op.text, kind: "del" });
+    } else if (op.t === "add") {
+      rn++;
+      addBuf.push({ num: rn, text: op.text, kind: "add" });
+    } else {
+      flush();
+      ln++;
+      rn++;
+      rows.push({
+        left: { num: ln, text: op.text, kind: "ctx" },
+        right: { num: rn, text: op.text, kind: "ctx" },
+      });
+    }
+  }
+  flush();
+  return rows;
+}
+
+// Pliega tramos largos de filas sin cambios en un marcador { gap: true, count },
+// dejando solo `ctx` filas alrededor de cada cambio (el look de un diff de GitHub).
+function collapseRows(rows, ctx) {
+  const isChange = (r) =>
+    !(r.left && r.left.kind === "ctx" && r.right && r.right.kind === "ctx");
+  const keep = new Array(rows.length).fill(false);
+  for (let k = 0; k < rows.length; k++) {
+    if (isChange(rows[k])) {
+      for (let d = -ctx; d <= ctx; d++) {
+        const idx = k + d;
+        if (idx >= 0 && idx < rows.length) keep[idx] = true;
+      }
+    }
+  }
+  const out = [];
+  let hidden = 0;
+  for (let k = 0; k < rows.length; k++) {
+    if (keep[k]) {
+      if (hidden > 0) {
+        out.push({ gap: true, count: hidden });
+        hidden = 0;
+      }
+      out.push(rows[k]);
+    } else {
+      hidden++;
+    }
+  }
+  if (hidden > 0) out.push({ gap: true, count: hidden });
+  return out;
+}
+
 const DEFAULT_SETTINGS = {
   // Lista de carpetas de destino. Cada destino es un objeto con su propio
   // horario: { path, autoEnabled, intervalMinutes }. La copia manual se guarda
@@ -495,6 +645,8 @@ class VaultBackupPlugin extends obsidian.Plugin {
               rel: path.relative(src, sp),
               srcSize: ss.size,
               destSize: null,
+              srcAbs: sp,
+              destAbs: dp,
             });
             continue;
           }
@@ -504,6 +656,8 @@ class VaultBackupPlugin extends obsidian.Plugin {
               rel: path.relative(src, sp),
               srcSize: ss.size,
               destSize: ds.size,
+              srcAbs: sp,
+              destAbs: dp,
             });
           }
         }
@@ -1175,6 +1329,177 @@ class MismatchesModal extends obsidian.Modal {
           `(${word} ${formatBytes(Math.abs(diff))} en la copia)`
       );
     }
+
+    this.addDiffButton(li, m);
+  }
+
+  // Anade un boton "Ver diff" que abre un NUEVO modal (DiffModal) por encima de
+  // este, con la comparacion lado a lado. Solo si la discrepancia trae las rutas
+  // absolutas (datos nuevos); en discrepancias antiguas sin rutas no aparece.
+  addDiffButton(li, m) {
+    if (!m.srcAbs) return;
+    const btn = li.createEl("button", {
+      cls: "vault-backup-diff-toggle",
+      text: "Ver diff",
+    });
+    btn.addEventListener("click", () => {
+      new DiffModal(this.app, { mismatch: m }).open();
+    });
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Modal de diff lado a lado (copia | vault)                          */
+/* ------------------------------------------------------------------ */
+
+// Modal que se abre POR ENCIMA del de discrepancias y muestra la comparacion de
+// un archivo en dos columnas: a la izquierda la copia, a la derecha el vault.
+// Lee ambas versiones bajo demanda (por sus rutas absolutas) al abrirse.
+// info: { mismatch } con { rel, srcSize, destSize, srcAbs, destAbs, ... }.
+class DiffModal extends obsidian.Modal {
+  constructor(app, info) {
+    super(app);
+    this.m = (info && info.mismatch) || {};
+  }
+
+  onOpen() {
+    const { contentEl, titleEl } = this;
+    this.modalEl.addClass("vault-backup-diff-modal");
+    titleEl.setText("Diff: " + (this.m.rel || ""));
+    this.bodyEl = contentEl.createDiv({ cls: "vault-backup-diff-modal-body" });
+    this.bodyEl.setText("Cargando diff...");
+    this.load().catch((e) => {
+      this.bodyEl.empty();
+      this.bodyEl.createEl("div", {
+        cls: "vault-backup-diff-msg",
+        text:
+          "No se pudo leer el archivo para el diff: " +
+          (e && e.message ? e.message : String(e)),
+      });
+    });
+  }
+
+  // Lee ambas versiones, decide si un diff de texto tiene sentido y lo pinta.
+  async load() {
+    const m = this.m;
+    const src = await readForDiff(m.srcAbs); // vault (origen)
+    const dst = m.destAbs
+      ? await readForDiff(m.destAbs) // copia
+      : { status: "missing" };
+    const body = this.bodyEl;
+    body.empty();
+    const msg = (t) =>
+      body.createEl("div", { cls: "vault-backup-diff-msg", text: t });
+    const copySize = m.destSize == null ? "no existe" : formatBytes(m.destSize);
+
+    if (src.status === "binary" || dst.status === "binary") {
+      msg(
+        `Archivo binario: no se muestra diff de texto. Vault: ${formatBytes(m.srcSize)} · Copia: ${copySize}.`
+      );
+      return;
+    }
+    if (src.status === "toobig" || dst.status === "toobig") {
+      msg(
+        `Archivo demasiado grande para el diff (mas de ${formatBytes(DIFF_MAX_BYTES)}). Vault: ${formatBytes(m.srcSize)} · Copia: ${copySize}.`
+      );
+      return;
+    }
+    if (src.status === "missing") {
+      msg("No se pudo leer el archivo del vault (pudo cambiar tras la copia).");
+      return;
+    }
+
+    // old = copia, new = vault. Si la copia falta, se lee como vacia: todo el
+    // contenido del vault sale como "anadido" (lo que le falta a la copia).
+    const oldText = dst.status === "ok" ? dst.text : "";
+    const newText = src.text;
+    if (dst.status === "missing") {
+      msg(
+        'Este archivo no existe en la copia. Su contenido en el vault aparece como "anadido" (en verde a la derecha).'
+      );
+    }
+    const oldLines = splitLines(oldText);
+    const newLines = splitLines(newText);
+    if (oldLines.length > DIFF_MAX_LINES || newLines.length > DIFF_MAX_LINES) {
+      msg(
+        `El archivo tiene demasiadas lineas (${Math.max(oldLines.length, newLines.length)}) para un diff comodo. Vault: ${formatBytes(m.srcSize)} · Copia: ${copySize}.`
+      );
+      return;
+    }
+    const ops = diffLines(oldLines, newLines);
+    if (!ops.some((o) => o.t !== "ctx")) {
+      msg(
+        "El contenido de texto es identico; la diferencia de tamano viene de los saltos de linea o la codificacion."
+      );
+      return;
+    }
+    this.renderSideBySide(body, collapseRows(alignDiff(ops), DIFF_CTX));
+  }
+
+  // Pinta las filas en una tabla de dos columnas (copia | vault) alineadas.
+  renderSideBySide(body, rows) {
+    const wrap = body.createDiv({ cls: "vault-backup-diff-split-wrap" });
+    const table = wrap.createEl("table", { cls: "vault-backup-diff-split" });
+
+    const cg = table.createEl("colgroup");
+    cg.createEl("col", { cls: "vault-backup-diff-col-num" });
+    cg.createEl("col", { cls: "vault-backup-diff-col-code" });
+    cg.createEl("col", { cls: "vault-backup-diff-col-num" });
+    cg.createEl("col", { cls: "vault-backup-diff-col-code" });
+
+    const thead = table.createEl("thead");
+    const htr = thead.createEl("tr");
+    htr.createEl("th", {
+      cls: "vault-backup-diff-th",
+      text: "Copia de seguridad",
+      attr: { colspan: "2" },
+    });
+    htr.createEl("th", {
+      cls: "vault-backup-diff-th",
+      text: "Vault (origen)",
+      attr: { colspan: "2" },
+    });
+
+    const tbody = table.createEl("tbody");
+    for (const row of rows) {
+      const tr = tbody.createEl("tr");
+      if (row.gap) {
+        tr.createEl("td", {
+          cls: "vault-backup-diff-gap",
+          text: `⋯ ${row.count} linea(s) sin cambios`,
+          attr: { colspan: "4" },
+        });
+        continue;
+      }
+      this.renderCell(tr, row.left);
+      this.renderCell(tr, row.right);
+    }
+  }
+
+  // Pinta el par de celdas (numero de linea + codigo) de un lado; null = hueco.
+  renderCell(tr, side) {
+    if (!side) {
+      tr.createEl("td", {
+        cls: "vault-backup-diff-num vault-backup-diff-empty",
+      });
+      tr.createEl("td", { cls: "vault-backup-diff-code vault-backup-diff-empty" });
+      return;
+    }
+    const kind =
+      side.kind === "del"
+        ? "vault-backup-diff-del"
+        : side.kind === "add"
+          ? "vault-backup-diff-add"
+          : "vault-backup-diff-ctx";
+    tr.createEl("td", {
+      cls: `vault-backup-diff-num ${kind}`,
+      text: String(side.num),
+    });
+    tr.createEl("td", { cls: `vault-backup-diff-code ${kind}`, text: side.text });
   }
 
   onClose() {
@@ -1401,5 +1726,9 @@ class VaultBackupSettingTab extends obsidian.PluginSettingTab {
 }
 
 module.exports = VaultBackupPlugin;
-// Ayudante puro expuesto solo para pruebas; no afecta a la carga en Obsidian.
+// Ayudantes puros expuestos solo para pruebas; no afectan a la carga en Obsidian.
 module.exports.interpretCliStatus = interpretCliStatus;
+module.exports.diffLines = diffLines;
+module.exports.alignDiff = alignDiff;
+module.exports.collapseRows = collapseRows;
+module.exports.looksBinary = looksBinary;

@@ -233,6 +233,119 @@
   font-size: 0.8em;
 }
 
+/* Boton "Ver diff" que abre el modal de comparacion lado a lado */
+.vault-backup-diff-toggle {
+  margin-top: 6px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--background-modifier-border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.8em;
+}
+
+.vault-backup-diff-toggle:hover {
+  color: var(--text-normal);
+  border-color: var(--text-muted);
+}
+
+/* Modal de diff lado a lado (mas ancho que el de discrepancias) */
+.vault-backup-diff-modal {
+  width: min(1100px, 95vw);
+}
+
+.vault-backup-diff-msg {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  font-style: italic;
+  margin-bottom: 8px;
+}
+
+/* Contenedor con scroll de la tabla del diff */
+.vault-backup-diff-split-wrap {
+  max-height: 65vh;
+  overflow: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+}
+
+.vault-backup-diff-split {
+  table-layout: fixed;
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-monospace);
+  font-size: 0.8em;
+  line-height: 1.45;
+  background: var(--background-primary);
+}
+
+.vault-backup-diff-col-num {
+  width: 3.2em;
+}
+
+/* Cabecera pegajosa: "Copia de seguridad" | "Vault (origen)" */
+.vault-backup-diff-th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 5px 8px;
+  text-align: left;
+  font-weight: var(--font-semibold);
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.vault-backup-diff-th + .vault-backup-diff-th {
+  border-left: 1px solid var(--background-modifier-border);
+}
+
+/* Numero de linea (columna estrecha, no seleccionable) */
+.vault-backup-diff-num {
+  text-align: right;
+  padding: 0 6px;
+  color: var(--text-faint);
+  user-select: none;
+  vertical-align: top;
+  border-right: 1px solid var(--background-modifier-border);
+}
+
+/* Celda de codigo: ajusta lineas largas sin romper la alineacion de filas */
+.vault-backup-diff-code {
+  padding: 0 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+  color: var(--text-normal);
+}
+
+.vault-backup-diff-add {
+  background: rgba(46, 160, 67, 0.18);
+}
+
+.vault-backup-diff-del {
+  background: rgba(224, 62, 62, 0.18);
+}
+
+.vault-backup-diff-ctx {
+  color: var(--text-muted);
+}
+
+.vault-backup-diff-empty {
+  background: var(--background-secondary);
+}
+
+.vault-backup-diff-gap {
+  padding: 2px 8px;
+  color: var(--text-faint);
+  background: var(--background-secondary);
+  text-align: center;
+  border-top: 1px solid var(--background-modifier-border);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
 .vault-backup-mismatch-note {
   color: var(--text-muted);
   font-size: 0.85em;

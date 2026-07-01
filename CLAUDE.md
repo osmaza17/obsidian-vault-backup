@@ -45,8 +45,10 @@ es el numero de copia hecha ese mismo dia (empezando en 1).
       tamano. Detecta copias incompletas, truncados o faltantes; NO detecta
       corrupcion bit a bit silenciosa (eso exigiria releer y hashear todo, ~2x
       I/O). Devuelve `{ checked, count, mismatches }`, donde cada discrepancia es
-      un objeto `{ type: "missing"|"size", rel, srcSize, destSize }` (el modal las
-      pinta con tamanos legibles y agrupadas por tipo).
+      un objeto `{ type: "missing"|"size", rel, srcSize, destSize, srcAbs, destAbs }`
+      (el modal las pinta con tamanos legibles y agrupadas por tipo; `srcAbs`/
+      `destAbs` son las rutas absolutas al archivo en el vault y en la copia, que
+      usa el modal para releer ambas versiones y pintar el diff bajo demanda).
     - `computeBackupFolderName(destPath)` - calcula la carpeta `DD MM YYYY - N`.
     - `applySchedule()` / `clearSchedule()` - un temporizador independiente por cada
       destino con copia automatica activada, cada uno con su propio intervalo
@@ -87,7 +89,28 @@ es el numero de copia hecha ese mismo dia (empezando en 1).
     copia" / "Tamano distinto") con tamanos legibles (`formatBytes`), que significa
     una discrepancia y que hacer. Recibe `{ title, destPath, checked, count,
     mismatches }`. En copias desde terminal cada discrepancia lleva `label` con el
-    destino al que pertenece.
+    destino al que pertenece. Cada fila (`renderItem`) lleva un boton "Ver diff"
+    (`addDiffButton`) que abre un `DiffModal` POR ENCIMA de este modal.
+  - `DiffModal` - modal (`obsidian.Modal`) que se abre sobre el de discrepancias y
+    muestra la comparacion de UN archivo en DOS columnas alineadas: a la izquierda
+    la copia, a la derecha el vault (`renderSideBySide` pinta una `<table>` con
+    numero de linea + codigo por lado). Recibe `{ mismatch }` y al abrirse relee
+    ambas versiones bajo demanda por sus rutas absolutas (`srcAbs`/`destAbs`);
+    convencion old=copia, new=vault, asi verde = anadido (esta en el vault) y rojo
+    = quitado (esta en la copia). Los faltantes (`type: "missing"`) salen como
+    "todo anadido". Descarta con un aviso los binarios (`looksBinary`, byte NUL) y
+    los archivos por encima de `DIFF_MAX_BYTES` (2 MB) o `DIFF_MAX_LINES` (3000
+    lineas); si el texto es igual pero el tamano difiere (saltos de
+    linea/codificacion) tambien lo avisa.
+  - `diffLines` / `alignDiff` / `collapseRows` / `looksBinary` / `readForDiff` /
+    `splitLines` - ayudantes PUROS del diff. `diffLines(old, new)` es un diff por
+    LCS que devuelve ops `{ t: "ctx"|"del"|"add", text }`; `alignDiff(ops)` las
+    convierte en FILAS lado a lado `{ left, right }` (cada lado `{ num, text, kind }`
+    o null para hueco), emparejando bloques de del+add; `collapseRows(rows, ctx)`
+    pliega los tramos largos de filas sin cambios en marcadores `{ gap: true, count }`
+    (el look de GitHub, `DIFF_CTX` = 3 filas alrededor de cada cambio). `diffLines`,
+    `alignDiff`, `collapseRows` y `looksBinary` se exportan aparte solo para las
+    pruebas.
   - `VaultBackupSettingTab` - pestana de ajustes (lista de destinos con
     anadir/elegir/eliminar; cada destino con su propio toggle de copia automatica
     e intervalo en minutos).
@@ -102,8 +125,10 @@ es el numero de copia hecha ese mismo dia (empezando en 1).
   Obsidian esta abierto, el plugin muestre su panel (una sola tarjeta `cli`, no una
   por destino). Si la verificacion encuentra discrepancias, el estado final de
   error tambien incluye `mismatches` (objetos `{ type, rel, srcSize, destSize,
-  label }`, el `label` indica el destino) y `mismatchCount` para que el panel del
-  plugin pinte el boton "Ver discrepancias".
+  srcAbs, destAbs, label }`, el `label` indica el destino; `srcAbs`/`destAbs` son
+  las rutas absolutas que el plugin usa para el diff, validas porque el CLI corre
+  en la misma maquina) y `mismatchCount` para que el panel del plugin pinte el
+  boton "Ver discrepancias".
   La logica de copia esta DUPLICADA a proposito desde
   `main.js` porque el plugin se carga como un unico archivo dentro de Obsidian; si
   cambias la copia en uno, hay que actualizar el otro.
@@ -115,13 +140,17 @@ es el numero de copia hecha ese mismo dia (empezando en 1).
   control de versiones (`.gitignore`).
 - `test/` - pruebas en Node plano (sin dependencias): `test-interpret.js` (funcion
   pura `interpretCliStatus`, con stub de `obsidian`), `test-cli.js` (integracion
-  del CLI contra un vault falso temporal) y `test-verify.js` (la verificacion
-  `verifyCopy`: detecta faltantes y truncados, no marca una copia fiel).
+  del CLI contra un vault falso temporal), `test-verify.js` (la verificacion
+  `verifyCopy`: detecta faltantes y truncados, no marca una copia fiel) y
+  `test-diff.js` (los ayudantes puros del diff: `diffLines`, `alignDiff`,
+  `collapseRows`, `looksBinary`).
 - `manifest.json` - metadatos del plugin.
 - `styles.css` - tamano del icono del boton, ancho del campo de ruta en ajustes,
   la pila de tarjetas de progreso (`.vault-backup-stack` + `.vault-backup-panel`),
-  y el boton/modal de discrepancias (`.vault-backup-mismatch-btn` +
-  `.vault-backup-mismatch-list`).
+  el boton/modal de discrepancias (`.vault-backup-mismatch-btn` +
+  `.vault-backup-mismatch-list`) y el modal de diff lado a lado
+  (`.vault-backup-diff*`: boton "Ver diff", modal ancho, tabla de dos columnas con
+  celdas add/del/ctx/empty y marcadores de hueco).
 - `data.json` - ajustes del usuario (lo crea/actualiza Obsidian; incluido en el repo).
 
 ## Ajustes
@@ -175,11 +204,19 @@ La UI sobre Electron no se prueba sola, pero la logica si:
   lo lea, dando un falso fallo; correrlo con Obsidian cerrado.)
 - `node test/test-verify.js` - prueba la verificacion `verifyCopy`: que detecta un
   archivo faltante y uno truncado, y que no marca nada en una copia fiel.
+- `node test/test-diff.js` - prueba los ayudantes puros del diff: `diffLines`
+  (identico, insercion, borrado, copia vacia, linea cambiada), `alignDiff`
+  (empareja del+add en filas lado a lado, deja huecos), `collapseRows` (pliega el
+  contexto largo en huecos) y `looksBinary`.
 
 A mano en Obsidian (lo que NO se puede automatizar): recargar el plugin, lanzar una
-copia con el boton o `Ctrl+S` y ver el panel. Para el panel de copias desde
-terminal: con Obsidian abierto y el plugin recargado, ejecutar `node backup-cli.js`
-y comprobar que aparece el mismo panel con el progreso.
+copia con el boton o `Ctrl+S` y ver el panel. El modal de diff lado a lado tampoco
+se prueba solo: hay que provocar una discrepancia (p. ej. copiar y luego editar un
+archivo de la copia) y abrir "Ver discrepancias" -> "Ver diff" (se abre un segundo
+modal, mas ancho, con la copia a la izquierda y el vault a la derecha). Para el
+panel de copias desde terminal: con Obsidian abierto y el plugin recargado,
+ejecutar `node backup-cli.js` y comprobar que aparece el mismo panel con el
+progreso.
 
 Para `backup-cli.js`: `node backup-cli.js --list` muestra la config sin copiar
 nada (comprobacion rapida sin riesgo); `node backup-cli.js` ejecuta la copia real.
