@@ -33,7 +33,9 @@ es el numero de copia hecha ese mismo dia (empezando en 1).
       destino captura su propio error sin tumbar a los demas. Tras copiar cada
       destino lo VERIFICA con `verifyCopy` (recuento + tamano); si hay
       discrepancias la tarjeta queda en estado de error aunque la copia en si no
-      fallara. En copia manual, muestra un `Notice` con el resumen al terminar.
+      fallara, y muestra el boton "Ver discrepancias" (`panel.showMismatches`)
+      que abre el `MismatchesModal` con la lista de archivos afectados. En copia
+      manual, muestra un `Notice` con el resumen al terminar.
     - `countFiles(src, shouldSkip)` - cuenta archivos para el progreso.
     - `copyDir(src, dest, shouldSkip, ctx)` - copia recursiva con `fs/promises`
       reportando el avance por archivo via `ctx.onProgress`.
@@ -42,7 +44,9 @@ es el numero de copia hecha ese mismo dia (empezando en 1).
       releer el contenido) que cada archivo existe en el destino con el mismo
       tamano. Detecta copias incompletas, truncados o faltantes; NO detecta
       corrupcion bit a bit silenciosa (eso exigiria releer y hashear todo, ~2x
-      I/O). Devuelve `{ checked, count, mismatches }`.
+      I/O). Devuelve `{ checked, count, mismatches }`, donde cada discrepancia es
+      un objeto `{ type: "missing"|"size", rel, srcSize, destSize }` (el modal las
+      pinta con tamanos legibles y agrupadas por tipo).
     - `computeBackupFolderName(destPath)` - calcula la carpeta `DD MM YYYY - N`.
     - `applySchedule()` / `clearSchedule()` - un temporizador independiente por cada
       destino con copia automatica activada, cada uno con su propio intervalo
@@ -56,7 +60,9 @@ es el numero de copia hecha ese mismo dia (empezando en 1).
       esta copiando (`isBackingUp`); el panel es suyo en ese caso.
   - `interpretCliStatus(st, now, shownStartedAt)` - funcion PURA que decide que
     hacer con el panel a partir del estado del CLI (mostrar progreso, finalizar en
-    done/error, ocultar si el estado esta obsoleto). Se exporta aparte
+    done/error, ocultar si el estado esta obsoleto). En finalize-error tambien
+    propaga `mismatches`/`mismatchCount` del estado para que el panel pueda pintar
+    el boton "Ver discrepancias". Se exporta aparte
     (`module.exports.interpretCliStatus`) solo para poder probarla en Node sin
     Obsidian; no afecta a la carga del plugin.
   - `BackupProgressManager` - gestiona una PILA de tarjetas de progreso apiladas en
@@ -71,7 +77,17 @@ es el numero de copia hecha ese mismo dia (empezando en 1).
     el contador muestre el total exacto y no se quede unos archivos corto por ese
     limite. Al ocultarse avisa a su gestor. Las usan tanto la copia del plugin
     (varias a la vez, una por destino) como la copia lanzada desde la terminal (una
-    sola, via el vigilante).
+    sola, via el vigilante). Cuando la verificacion falla, `showMismatches(list,
+    count, info)` anade un boton "Ver discrepancias" que abre el `MismatchesModal`
+    (info opcional: `{ checked, destPath }` para el contexto); `clearMismatches()`
+    lo retira al reutilizar la tarjeta en una copia nueva.
+  - `MismatchesModal` - modal centrado (`obsidian.Modal`) con contexto de la
+    verificacion fallida: nombre y ruta del destino, cuantos archivos se
+    verificaron, y la lista de discrepancias AGRUPADA por tipo ("Faltan en la
+    copia" / "Tamano distinto") con tamanos legibles (`formatBytes`), que significa
+    una discrepancia y que hacer. Recibe `{ title, destPath, checked, count,
+    mismatches }`. En copias desde terminal cada discrepancia lleva `label` con el
+    destino al que pertenece.
   - `VaultBackupSettingTab` - pestana de ajustes (lista de destinos con
     anadir/elegir/eliminar; cada destino con su propio toggle de copia automatica
     e intervalo en minutos).
@@ -84,11 +100,16 @@ es el numero de copia hecha ese mismo dia (empezando en 1).
   Escribe su progreso en `.cli-backup-status.json` (en la carpeta del plugin) como
   UN solo estado agregado (suma de lo copiado por cada destino) para que, si
   Obsidian esta abierto, el plugin muestre su panel (una sola tarjeta `cli`, no una
-  por destino). La logica de copia esta DUPLICADA a proposito desde
+  por destino). Si la verificacion encuentra discrepancias, el estado final de
+  error tambien incluye `mismatches` (objetos `{ type, rel, srcSize, destSize,
+  label }`, el `label` indica el destino) y `mismatchCount` para que el panel del
+  plugin pinte el boton "Ver discrepancias".
+  La logica de copia esta DUPLICADA a proposito desde
   `main.js` porque el plugin se carga como un unico archivo dentro de Obsidian; si
   cambias la copia en uno, hay que actualizar el otro.
 - `.cli-backup-status.json` - archivo EFIMERO de estado que escribe `backup-cli.js`
-  durante una copia desde terminal (fase, total, copiados, archivo actual). El
+  durante una copia desde terminal (fase, total, copiados, archivo actual; y en el
+  estado final de error por verificacion, `mismatches`/`mismatchCount`). El
   plugin lo vigila para pintar el panel y lo borra al consumir el estado final; el
   CLI lo borra al arrancar una copia nueva. Se excluye de la propia copia y del
   control de versiones (`.gitignore`).
@@ -97,8 +118,10 @@ es el numero de copia hecha ese mismo dia (empezando en 1).
   del CLI contra un vault falso temporal) y `test-verify.js` (la verificacion
   `verifyCopy`: detecta faltantes y truncados, no marca una copia fiel).
 - `manifest.json` - metadatos del plugin.
-- `styles.css` - tamano del icono del boton, ancho del campo de ruta en ajustes, y
-  la pila de tarjetas de progreso (`.vault-backup-stack` + `.vault-backup-panel`).
+- `styles.css` - tamano del icono del boton, ancho del campo de ruta en ajustes,
+  la pila de tarjetas de progreso (`.vault-backup-stack` + `.vault-backup-panel`),
+  y el boton/modal de discrepancias (`.vault-backup-mismatch-btn` +
+  `.vault-backup-mismatch-list`).
 - `data.json` - ajustes del usuario (lo crea/actualiza Obsidian; incluido en el repo).
 
 ## Ajustes

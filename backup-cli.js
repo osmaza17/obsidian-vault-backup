@@ -188,11 +188,23 @@ async function copyDir(src, dest, shouldSkip, ctx) {
   return ctx.copied;
 }
 
+// Convierte una discrepancia estructurada en una linea legible para el log
+// (replica de main.js).
+function describeMismatch(m) {
+  const label = m && m.label ? `[${m.label}] ` : "";
+  if (!m) return `${label}discrepancia`;
+  if (m.type === "missing") {
+    return `${label}falta en la copia: ${m.rel} (${m.srcSize} bytes en el vault)`;
+  }
+  return `${label}tamano distinto: ${m.rel} (vault ${m.srcSize} vs copia ${m.destSize} bytes)`;
+}
+
 // Verificacion barata tras copiar (replica de main.js): recorre el origen igual
 // que copyDir y comprueba que cada archivo existe en el destino con el MISMO
 // tamano (stat, sin releer el contenido). Detecta copias incompletas, truncados
 // o que falten; NO detecta corrupcion bit a bit silenciosa. Devuelve
-// { checked, count, mismatches }.
+// { checked, count, mismatches } con las discrepancias como objetos
+// { type: "missing"|"size", rel, srcSize, destSize }.
 async function verifyCopy(src, dest, shouldSkip) {
   const MAX_REPORT = 20;
   const detailed = [];
@@ -227,11 +239,21 @@ async function verifyCopy(src, dest, shouldSkip) {
         try {
           ds = await fsp.stat(dp);
         } catch (e) {
-          flag(`falta en el destino: ${path.relative(src, sp)}`);
+          flag({
+            type: "missing",
+            rel: path.relative(src, sp),
+            srcSize: ss.size,
+            destSize: null,
+          });
           continue;
         }
         if (ss.size !== ds.size) {
-          flag(`tamano distinto: ${path.relative(src, sp)} (${ss.size} vs ${ds.size} bytes)`);
+          flag({
+            type: "size",
+            rel: path.relative(src, sp),
+            srcSize: ss.size,
+            destSize: ds.size,
+          });
         }
       }
     }
@@ -407,6 +429,8 @@ async function main() {
   const copiedByDest = new Array(validDests.length).fill(0);
   const okFlags = new Array(validDests.length).fill(false);
   const verifyFails = []; // destinos copiados pero con discrepancias al verificar
+  const mismatchDetails = []; // descripciones de archivos con discrepancias (para el panel)
+  let mismatchCount = 0; // total de discrepancias sumando todos los destinos
 
   const paintAggregate = (file) => {
     const done = copiedByDest.reduce((a, b) => a + b, 0);
@@ -452,9 +476,15 @@ async function main() {
           );
         } else {
           verifyFails.push(`${destRoot}: ${v.count} discrepancia(s)`);
+          mismatchCount += v.count;
+          // Guardamos las discrepancias (con etiqueta de destino) para que el
+          // panel del plugin pueda listarlas en su modal de discrepancias.
+          for (const m of v.mismatches) {
+            mismatchDetails.push(Object.assign({}, m, { label }));
+          }
           console.warn(
             `\n[vault-backup] AVISO verificacion "${folderName}" (${label}): ${v.count} discrepancia(s):\n  ` +
-              v.mismatches.join("\n  ")
+              v.mismatches.map(describeMismatch).join("\n  ")
           );
         }
       } catch (e) {
@@ -479,14 +509,30 @@ async function main() {
     // Se copio todo, pero la verificacion encontro discrepancias en algun destino.
     const msg = `Copia hecha pero verificacion con discrepancias en ${verifyFails.length} destino(s): ${verifyFails.join(" | ")}`;
     console.error(`[vault-backup] ${msg}`);
-    writeStatus({ phase: "error", status: msg, total, copied: copiedTotal, file: "" });
+    writeStatus({
+      phase: "error",
+      status: msg,
+      total,
+      copied: copiedTotal,
+      file: "",
+      mismatches: mismatchDetails,
+      mismatchCount,
+    });
     return 1;
   }
   if (okCount > 0) {
     const extra = verifyFails.length ? ` (+${verifyFails.length} con discrepancias al verificar)` : "";
     const msg = `Copia parcial: ${okCount} ok, ${errors.length} con error en ${secs}s${extra}`;
     console.error(`[vault-backup] ${msg}`);
-    writeStatus({ phase: "error", status: msg, total, copied: copiedTotal, file: "" });
+    writeStatus({
+      phase: "error",
+      status: msg,
+      total,
+      copied: copiedTotal,
+      file: "",
+      mismatches: mismatchDetails,
+      mismatchCount,
+    });
     return 1;
   }
   const msg = `Error en todos los destinos: ${errors.join(" | ")}`;

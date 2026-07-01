@@ -12,6 +12,7 @@ Module._load = function (request) {
       Plugin: class {},
       PluginSettingTab: class {},
       FileSystemAdapter: class {},
+      Modal: class {},
       Notice: class {},
       Setting: class {},
       setIcon: () => {},

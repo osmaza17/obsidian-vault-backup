@@ -125,6 +125,128 @@
   color: var(--text-error, #e03e3e);
 }
 
+/* Boton "Ver discrepancias" (aparece en la tarjeta cuando la verificacion falla) */
+.vault-backup-mismatch-btn {
+  margin-top: 10px;
+  width: 100%;
+  cursor: pointer;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--text-error, #e03e3e);
+  background: transparent;
+  color: var(--text-error, #e03e3e);
+  font-size: 0.9em;
+  font-weight: var(--font-semibold);
+}
+
+.vault-backup-mismatch-btn:hover {
+  background: var(--text-error, #e03e3e);
+  color: var(--text-on-accent, #fff);
+}
+
+/* Modal centrado con la lista de archivos con discrepancias */
+.vault-backup-mismatch-modal {
+  width: min(680px, 90vw);
+}
+
+/* Nombre del destino verificado */
+.vault-backup-mismatch-dest {
+  font-weight: var(--font-semibold);
+  font-size: 1.05em;
+}
+
+/* Ruta completa de la copia verificada */
+.vault-backup-mismatch-path {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  font-family: var(--font-monospace);
+  margin-bottom: 10px;
+  word-break: break-all;
+}
+
+.vault-backup-mismatch-summary {
+  font-weight: var(--font-semibold);
+  color: var(--text-error, #e03e3e);
+}
+
+.vault-backup-mismatch-help {
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+
+/* Cabecera de cada grupo (faltan / tamano distinto) */
+.vault-backup-mismatch-group {
+  margin: 14px 0 6px;
+  font-size: 0.95em;
+}
+
+.vault-backup-mismatch-list {
+  max-height: 45vh;
+  overflow-y: auto;
+  margin: 4px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.vault-backup-mismatch-item {
+  padding: 6px 8px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  background: var(--background-secondary);
+}
+
+.vault-backup-mismatch-item-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* Etiqueta del destino (solo en copias desde terminal, que agregan varios) */
+.vault-backup-mismatch-tag {
+  flex: 0 0 auto;
+  font-size: 0.75em;
+  color: var(--text-muted);
+  background: var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 0 5px;
+}
+
+.vault-backup-mismatch-file {
+  font-family: var(--font-monospace);
+  font-size: 0.85em;
+  word-break: break-all;
+}
+
+.vault-backup-mismatch-dir {
+  color: var(--text-faint);
+}
+
+.vault-backup-mismatch-name {
+  color: var(--text-normal);
+  font-weight: var(--font-semibold);
+}
+
+.vault-backup-mismatch-sizes {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 0.8em;
+}
+
+.vault-backup-mismatch-note {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  font-style: italic;
+}
+
+.vault-backup-mismatch-hint {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+
 /* Ajustes: fila de la carpeta de destino con campo de ruta ancho */
 .vault-backup-path-setting .setting-item-info {
   flex: 0 0 auto;

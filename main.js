@@ -11,6 +11,32 @@ const path = require("path");
 // copia.
 const CLI_STATUS_FILE = ".cli-backup-status.json";
 
+// Tamano legible (B/KB/MB/GB...). Se usa en el modal de discrepancias.
+function formatBytes(n) {
+  if (n == null || isNaN(n)) return "-";
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+// Convierte una discrepancia estructurada { type, rel, srcSize, destSize, label }
+// en una linea legible (para el log de consola). El modal la pinta aparte con mas
+// detalle.
+function describeMismatch(m) {
+  const label = m && m.label ? `[${m.label}] ` : "";
+  if (!m) return `${label}discrepancia`;
+  if (m.type === "missing") {
+    return `${label}falta en la copia: ${m.rel} (${m.srcSize} bytes en el vault)`;
+  }
+  return `${label}tamano distinto: ${m.rel} (vault ${m.srcSize} vs copia ${m.destSize} bytes)`;
+}
+
 const DEFAULT_SETTINGS = {
   // Lista de carpetas de destino. Cada destino es un objeto con su propio
   // horario: { path, autoEnabled, intervalMinutes }. La copia manual se guarda
@@ -90,6 +116,10 @@ function interpretCliStatus(st, now, shownStartedAt) {
       text:
         st.status ||
         (st.phase === "done" ? "Copia completada" : "Error en la copia"),
+      // Lista de discrepancias de la verificacion (para el boton "Ver
+      // discrepancias" del panel); solo la escribe el CLI cuando verifica mal.
+      mismatches: Array.isArray(st.mismatches) ? st.mismatches : [],
+      mismatchCount: Number(st.mismatchCount) || 0,
     };
   }
 
@@ -126,7 +156,9 @@ class VaultBackupPlugin extends obsidian.Plugin {
     this.bottomBtn = null;
     this.statusBtn = null;
     // Gestor de la pila de tarjetas de progreso (una por copia en curso).
-    this.progress = new BackupProgressManager();
+    // Le pasamos la app para que las tarjetas puedan abrir el modal de
+    // discrepancias cuando la verificacion falla.
+    this.progress = new BackupProgressManager(this.app);
     // Vigilante del archivo de estado de backup-cli.js (copias por terminal).
     this.cliWatchId = null;
     // startedAt de la copia de terminal que el panel muestra ahora (o null).
@@ -422,7 +454,8 @@ class VaultBackupPlugin extends obsidian.Plugin {
   // (`stat`, sin releer el contenido, asi que apenas anade coste). Detecta
   // copias incompletas, archivos truncados o que falten. NO detecta corrupcion
   // bit a bit silenciosa (eso exigiria releer y hashear todo, ~2x I/O). Devuelve
-  // { checked, count, mismatches } con hasta MAX_REPORT discrepancias descritas.
+  // { checked, count, mismatches } con hasta MAX_REPORT discrepancias como
+  // objetos { type: "missing"|"size", rel, srcSize, destSize }.
   async verifyCopy(src, dest, shouldSkip) {
     const MAX_REPORT = 20;
     const detailed = [];
@@ -457,13 +490,21 @@ class VaultBackupPlugin extends obsidian.Plugin {
           try {
             ds = await fsp.stat(dp);
           } catch (e) {
-            flag(`falta en el destino: ${path.relative(src, sp)}`);
+            flag({
+              type: "missing",
+              rel: path.relative(src, sp),
+              srcSize: ss.size,
+              destSize: null,
+            });
             continue;
           }
           if (ss.size !== ds.size) {
-            flag(
-              `tamano distinto: ${path.relative(src, sp)} (${ss.size} vs ${ds.size} bytes)`
-            );
+            flag({
+              type: "size",
+              rel: path.relative(src, sp),
+              srcSize: ss.size,
+              destSize: ds.size,
+            });
           }
         }
       }
@@ -622,9 +663,13 @@ class VaultBackupPlugin extends obsidian.Plugin {
             panel.setError(
               `Copiado, pero la verificacion encontro ${v.count} discrepancia(s)`
             );
+            panel.showMismatches(v.mismatches, v.count, {
+              checked: v.checked,
+              destPath: targetDir,
+            });
             console.warn(
               `[vault-backup] verificacion de "${destRoot}": ${v.count} discrepancia(s):\n  ` +
-                v.mismatches.join("\n  ")
+                v.mismatches.map(describeMismatch).join("\n  ")
             );
             return { ok: true, copied: ctx.copied, verified: false, verifyCount: v.count };
           } catch (e) {
@@ -754,6 +799,9 @@ class VaultBackupPlugin extends obsidian.Plugin {
           panel.setDone(decision.text);
         } else {
           panel.setError(decision.text);
+          panel.showMismatches(decision.mismatches, decision.mismatchCount, {
+            checked: decision.total,
+          });
         }
         this.cliShownFor = null;
         // Consumido: borramos el archivo para no volver a procesarlo.
@@ -773,7 +821,8 @@ class VaultBackupPlugin extends obsidian.Plugin {
 // por copia en curso (un destino del plugin, o la copia desde terminal). Crea
 // el contenedor cuando hace falta y lo retira cuando ya no queda ninguna.
 class BackupProgressManager {
-  constructor() {
+  constructor(app) {
+    this.app = app || null;
     this.stackEl = null;
     this.panels = new Map(); // id -> BackupProgressPanel
   }
@@ -823,6 +872,12 @@ class BackupProgressPanel {
     this.barEl = null;
     this.countEl = null;
     this.fileEl = null;
+    // Boton "Ver discrepancias" y datos que muestra su modal. Solo aparece
+    // cuando la verificacion posterior a la copia encuentra diferencias.
+    this.mismatchBtnEl = null;
+    this.mismatches = [];
+    this.mismatchCount = 0;
+    this.mismatchInfo = {};
     this.total = 0;
     this.lastPaint = 0;
     this.hideTimer = null;
@@ -862,6 +917,8 @@ class BackupProgressPanel {
     this.ensure();
     this.el.removeClass("vault-backup-done");
     this.el.removeClass("vault-backup-error");
+    // Una copia nueva empieza limpia: fuera el boton de una copia anterior.
+    this.clearMismatches();
   }
 
   // Titulo de la tarjeta (p.ej. "Destino 1" o "Copia desde terminal").
@@ -920,6 +977,45 @@ class BackupProgressPanel {
     this.fileEl.setText("");
   }
 
+  // Muestra el boton "Ver discrepancias" con la lista de archivos que no
+  // coincidieron en la verificacion. Al pulsarlo abre un modal centrado.
+  // list: hasta MAX_REPORT objetos de discrepancia; count: total real;
+  // info (opcional): { checked, destPath } para dar contexto en el modal.
+  showMismatches(list, count, info) {
+    this.ensure();
+    this.mismatches = Array.isArray(list) ? list : [];
+    this.mismatchCount = count || this.mismatches.length;
+    this.mismatchInfo = info || {};
+    if (!this.mismatches.length) return;
+    if (!this.mismatchBtnEl) {
+      this.mismatchBtnEl = this.el.createEl("button", {
+        cls: "vault-backup-mismatch-btn",
+      });
+      this.mismatchBtnEl.addEventListener("click", () => {
+        const app = this.manager ? this.manager.app : null;
+        new MismatchesModal(app, {
+          title: this.titleEl ? this.titleEl.getText() : "",
+          destPath: this.mismatchInfo.destPath || "",
+          checked: this.mismatchInfo.checked,
+          count: this.mismatchCount,
+          mismatches: this.mismatches,
+        }).open();
+      });
+    }
+    this.mismatchBtnEl.setText(`Ver discrepancias (${this.mismatchCount})`);
+  }
+
+  // Quita el boton de discrepancias (al reutilizar la tarjeta en una copia nueva).
+  clearMismatches() {
+    this.mismatches = [];
+    this.mismatchCount = 0;
+    this.mismatchInfo = {};
+    if (this.mismatchBtnEl) {
+      this.mismatchBtnEl.remove();
+      this.mismatchBtnEl = null;
+    }
+  }
+
   scheduleHide(ms) {
     if (this.hideTimer) window.clearTimeout(this.hideTimer);
     this.hideTimer = window.setTimeout(() => this.hide(), ms);
@@ -934,7 +1030,155 @@ class BackupProgressPanel {
       this.el.remove();
       this.el = null;
     }
+    this.mismatchBtnEl = null;
+    this.mismatches = [];
+    this.mismatchCount = 0;
+    this.mismatchInfo = {};
     if (this.manager) this.manager.notifyHidden(this.id);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Modal de discrepancias                                             */
+/* ------------------------------------------------------------------ */
+
+// Ventana centrada que lista los archivos con discrepancias detectados por la
+// verificacion. La abre el boton "Ver discrepancias" de una tarjeta de progreso.
+// info: { title, destPath, checked, count, mismatches } (mismatches como objetos
+// { type: "missing"|"size", rel, srcSize, destSize, label? }).
+class MismatchesModal extends obsidian.Modal {
+  constructor(app, info) {
+    super(app);
+    const i = info || {};
+    this.destTitle = i.title || "";
+    this.destPath = i.destPath || "";
+    this.checked = i.checked;
+    this.mismatches = Array.isArray(i.mismatches) ? i.mismatches : [];
+    this.count = i.count || this.mismatches.length;
+  }
+
+  onOpen() {
+    const { contentEl, titleEl } = this;
+    this.modalEl.addClass("vault-backup-mismatch-modal");
+    titleEl.setText("Discrepancias en la verificacion");
+
+    // --- Contexto: que destino y donde estaba la copia ---
+    if (this.destTitle) {
+      contentEl.createEl("div", {
+        cls: "vault-backup-mismatch-dest",
+        text: this.destTitle,
+      });
+    }
+    if (this.destPath) {
+      const p = contentEl.createEl("div", {
+        cls: "vault-backup-mismatch-path",
+        text: this.destPath,
+      });
+      p.setAttr("aria-label", this.destPath);
+    }
+
+    // --- Resumen ---
+    const missing = this.mismatches.filter((m) => m.type === "missing").length;
+    const sized = this.mismatches.filter((m) => m.type === "size").length;
+    const summary = contentEl.createEl("p", {
+      cls: "vault-backup-mismatch-summary",
+    });
+    summary.setText(
+      (this.checked ? `Se verificaron ${this.checked} archivos. ` : "") +
+        `${this.count} no coinciden entre el vault y la copia.`
+    );
+
+    // --- Que significa esto ---
+    contentEl.createEl("p", {
+      cls: "vault-backup-mismatch-help",
+      text:
+        "La verificacion comprueba que cada archivo del vault exista en la copia " +
+        "con el mismo tamano (no compara el contenido byte a byte). Estos archivos " +
+        "no pasaron esa comprobacion:",
+    });
+
+    // --- Lista agrupada por tipo de discrepancia ---
+    const groups = [
+      {
+        key: "missing",
+        label: "Faltan en la copia",
+        items: this.mismatches.filter((m) => m.type === "missing"),
+      },
+      {
+        key: "size",
+        label: "Tamano distinto",
+        items: this.mismatches.filter((m) => m.type === "size"),
+      },
+    ];
+
+    for (const g of groups) {
+      if (!g.items.length) continue;
+      contentEl.createEl("h3", {
+        cls: "vault-backup-mismatch-group",
+        text: `${g.label} (${g.items.length})`,
+      });
+      const list = contentEl.createEl("ul", {
+        cls: "vault-backup-mismatch-list",
+      });
+      for (const m of g.items) {
+        this.renderItem(list, m);
+      }
+    }
+
+    // La verificacion guarda un maximo de discrepancias por destino; si el total
+    // real es mayor, avisamos de cuantas quedan sin listar.
+    if (this.count > this.mismatches.length) {
+      contentEl.createEl("p", {
+        cls: "vault-backup-mismatch-note",
+        text: `Solo se muestran ${this.mismatches.length} de ${this.count}. Revisa la consola de Obsidian (Ctrl+Shift+I) para el detalle completo.`,
+      });
+    }
+
+    // --- Que hacer ---
+    contentEl.createEl("p", {
+      cls: "vault-backup-mismatch-hint",
+      text:
+        "Sugerencia: vuelve a lanzar la copia. Si el problema persiste, comprueba " +
+        "que el disco de destino tenga espacio libre y no este protegido contra " +
+        "escritura. Las copias anteriores no se tocan.",
+    });
+  }
+
+  // Pinta una fila: etiqueta de destino (solo en copias desde terminal, que
+  // agregan varios destinos), ruta (con la carpeta atenuada y el nombre resaltado)
+  // y el detalle de tamanos.
+  renderItem(list, m) {
+    const li = list.createEl("li", { cls: "vault-backup-mismatch-item" });
+
+    const head = li.createDiv({ cls: "vault-backup-mismatch-item-head" });
+    if (m.label) {
+      head.createSpan({ cls: "vault-backup-mismatch-tag", text: m.label });
+    }
+    const rel = m.rel || "";
+    const cut = Math.max(rel.lastIndexOf("/"), rel.lastIndexOf("\\"));
+    const dir = cut >= 0 ? rel.slice(0, cut + 1) : "";
+    const name = cut >= 0 ? rel.slice(cut + 1) : rel;
+    const fileEl = head.createSpan({ cls: "vault-backup-mismatch-file" });
+    if (dir) fileEl.createSpan({ cls: "vault-backup-mismatch-dir", text: dir });
+    fileEl.createSpan({ cls: "vault-backup-mismatch-name", text: name });
+
+    const detail = li.createDiv({ cls: "vault-backup-mismatch-sizes" });
+    if (m.type === "missing") {
+      detail.setText(
+        `No existe en la copia. En el vault ocupa ${formatBytes(m.srcSize)}.`
+      );
+    } else {
+      const diff = (m.srcSize || 0) - (m.destSize || 0);
+      const word = diff > 0 ? "faltan" : "sobran";
+      detail.setText(
+        `Vault: ${formatBytes(m.srcSize)} · Copia: ${formatBytes(m.destSize)} ` +
+          `(${word} ${formatBytes(Math.abs(diff))} en la copia)`
+      );
+    }
+  }
+
+  onClose() {
+    this.contentEl.empty();
   }
 }
 

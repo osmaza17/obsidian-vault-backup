@@ -16,6 +16,7 @@ Module._load = function (request) {
       Plugin: class {},
       PluginSettingTab: class {},
       FileSystemAdapter: class {},
+      Modal: class {},
       Notice: class {},
       Setting: class {},
       setIcon: () => {},
@@ -62,8 +63,14 @@ fs.writeFileSync(path.join(bad, "sub", "b.md"), "BBB");
   check("copia fiel: 0 discrepancias", g.count === 0);
   check("copia mala: checked === 3", b.checked === 3);
   check("copia mala: 2 discrepancias", b.count === 2);
-  check("copia mala: detalla el faltante (c.md)", b.mismatches.some((m) => /falta.*c\.md/.test(m)));
-  check("copia mala: detalla el tamano (b.md)", b.mismatches.some((m) => /tamano distinto.*b\.md/.test(m)));
+  check(
+    "copia mala: detalla el faltante (c.md)",
+    b.mismatches.some((m) => m.type === "missing" && /c\.md$/.test(m.rel) && m.srcSize === 2 && m.destSize === null)
+  );
+  check(
+    "copia mala: detalla el tamano (b.md)",
+    b.mismatches.some((m) => m.type === "size" && /b\.md$/.test(m.rel) && m.srcSize === 7 && m.destSize === 3)
+  );
 
   try {
     fs.rmSync(tmp, { recursive: true, force: true });

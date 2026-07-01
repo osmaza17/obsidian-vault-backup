@@ -33,7 +33,12 @@ equivale a copiar la carpeta del vault desde el explorador y pegarla en otra rut
 - Al terminar cada destino, **verifica la copia** automaticamente: comprueba que
   todos los archivos esten en el destino con el mismo tamano. Es una comprobacion
   barata (no vuelve a leer el contenido), pensada para detectar copias incompletas
-  o archivos truncados. Si algo no cuadra, te avisa en esa tarjeta.
+  o archivos truncados. Si algo no cuadra, te avisa en esa tarjeta y aparece un
+  boton **"Ver discrepancias"** que abre una ventana centrada con el detalle: el
+  destino y su ruta, cuantos archivos se verificaron, y la lista de archivos
+  afectados **agrupada por tipo** (los que faltan y los de distinto tamano), con
+  los tamanos en el vault y en la copia, una explicacion de que significa y que
+  hacer.
 - Cada carpeta de destino tiene su **propia copia automatica**: puedes activarla de
   forma independiente y con un **intervalo distinto** para cada destino. Asi puedes,
   por ejemplo, copiar a una ruta cada 30 minutos y a otra cada 6 horas.
@@ -99,8 +104,9 @@ lanzas la copia desde la terminal, veras un panel de progreso en la esquina
 inferior izquierda. A diferencia de la copia desde Obsidian (una tarjeta por
 destino), la copia desde la terminal muestra **un solo panel agregado** con el
 progreso conjunto de todos los destinos. El script escribe su avance en un archivo
-de estado (`.cli-backup-status.json`) y el plugin lo refleja en el panel. Si
-Obsidian esta cerrado, la copia funciona igual, solo que sin panel.
+de estado (`.cli-backup-status.json`) y el plugin lo refleja en el panel,
+incluido el boton "Ver discrepancias" si la verificacion encuentra diferencias.
+Si Obsidian esta cerrado, la copia funciona igual, solo que sin panel.
 
 ## Ajustes
 
