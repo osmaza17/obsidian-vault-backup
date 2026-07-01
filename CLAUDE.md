@@ -91,17 +91,24 @@ es el numero de copia hecha ese mismo dia (empezando en 1).
     mismatches }`. En copias desde terminal cada discrepancia lleva `label` con el
     destino al que pertenece. Cada fila (`renderItem`) lleva un boton "Ver diff"
     (`addDiffButton`) que abre un `DiffModal` POR ENCIMA de este modal.
-  - `DiffModal` - modal (`obsidian.Modal`) que se abre sobre el de discrepancias y
-    muestra la comparacion de UN archivo en DOS columnas alineadas: a la izquierda
-    la copia, a la derecha el vault (`renderSideBySide` pinta una `<table>` con
-    numero de linea + codigo por lado). Recibe `{ mismatch }` y al abrirse relee
-    ambas versiones bajo demanda por sus rutas absolutas (`srcAbs`/`destAbs`);
-    convencion old=copia, new=vault, asi verde = anadido (esta en el vault) y rojo
-    = quitado (esta en la copia). Los faltantes (`type: "missing"`) salen como
-    "todo anadido". Descarta con un aviso los binarios (`looksBinary`, byte NUL) y
-    los archivos por encima de `DIFF_MAX_BYTES` (2 MB) o `DIFF_MAX_LINES` (3000
-    lineas); si el texto es igual pero el tamano difiere (saltos de
-    linea/codificacion) tambien lo avisa.
+  - `DiffModal` - modal GRANDE (`obsidian.Modal`, casi a pantalla completa:
+    `width: min(1800px, 98vw)`, `height: 94vh`, en flex-column para que la tabla
+    ocupe todo el alto) que se abre sobre el de discrepancias y muestra la
+    comparacion de UN archivo en DOS paneles claramente separados y etiquetados:
+    a la IZQUIERDA la copia ("LO REAL · La copia de seguridad", barra roja) y a la
+    DERECHA el vault ("LO ESPERADO · El vault (original)", barra verde), cada
+    cabecera con subtitulo (que es y su tamano). `renderSideBySide` pinta primero
+    una barra superior (`vault-backup-diff-head`) con la ruta del archivo y la
+    leyenda de colores (rojo = solo en la copia, verde = solo en el vault) y luego
+    una `<table>` de dos columnas (numero de linea + codigo por lado) con un
+    separador grueso entre paneles (`vault-backup-diff-sep` en el lado del vault).
+    Recibe `{ mismatch }` y al abrirse relee ambas versiones bajo demanda por sus
+    rutas absolutas (`srcAbs`/`destAbs`); convencion old=copia, new=vault, asi
+    verde = anadido (esta en el vault) y rojo = quitado (esta en la copia). Los
+    faltantes (`type: "missing"`) salen como "todo anadido". Descarta con un aviso
+    los binarios (`looksBinary`, byte NUL) y los archivos por encima de
+    `DIFF_MAX_BYTES` (2 MB) o `DIFF_MAX_LINES` (3000 lineas); si el texto es igual
+    pero el tamano difiere (saltos de linea/codificacion) tambien lo avisa.
   - `diffLines` / `alignDiff` / `collapseRows` / `looksBinary` / `readForDiff` /
     `splitLines` - ayudantes PUROS del diff. `diffLines(old, new)` es un diff por
     LCS que devuelve ops `{ t: "ctx"|"del"|"add", text }`; `alignDiff(ops)` las
@@ -149,8 +156,10 @@ es el numero de copia hecha ese mismo dia (empezando en 1).
   la pila de tarjetas de progreso (`.vault-backup-stack` + `.vault-backup-panel`),
   el boton/modal de discrepancias (`.vault-backup-mismatch-btn` +
   `.vault-backup-mismatch-list`) y el modal de diff lado a lado
-  (`.vault-backup-diff*`: boton "Ver diff", modal ancho, tabla de dos columnas con
-  celdas add/del/ctx/empty y marcadores de hueco).
+  (`.vault-backup-diff*`: boton "Ver diff"; modal casi a pantalla completa en
+  flex-column; barra superior con ruta y leyenda; cabeceras de dos lineas con
+  barra de color roja/verde; tabla de dos columnas con separador grueso central
+  y celdas add/del/ctx/empty y marcadores de hueco).
 - `data.json` - ajustes del usuario (lo crea/actualiza Obsidian; incluido en el repo).
 
 ## Ajustes

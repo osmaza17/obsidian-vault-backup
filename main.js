@@ -1440,8 +1440,24 @@ class DiffModal extends obsidian.Modal {
     this.renderSideBySide(body, collapseRows(alignDiff(ops), DIFF_CTX));
   }
 
-  // Pinta las filas en una tabla de dos columnas (copia | vault) alineadas.
+  // Pinta el contexto (ruta, tamanos, leyenda) y las filas en una tabla de dos
+  // columnas (copia | vault) claramente separadas y etiquetadas.
   renderSideBySide(body, rows) {
+    const m = this.m;
+    const copySize = m.destSize == null ? "no existe" : formatBytes(m.destSize);
+    const srcSize = formatBytes(m.srcSize);
+
+    // Barra superior: ruta del archivo y leyenda de colores.
+    const head = body.createDiv({ cls: "vault-backup-diff-head" });
+    head.createDiv({ cls: "vault-backup-diff-head-path", text: m.rel || "" });
+    const legend = head.createDiv({ cls: "vault-backup-diff-legend" });
+    const legDel = legend.createDiv({ cls: "vault-backup-diff-legend-item" });
+    legDel.createSpan({ cls: "vault-backup-diff-swatch vault-backup-diff-del" });
+    legDel.createSpan({ text: "Solo en la copia (sobra o difiere)" });
+    const legAdd = legend.createDiv({ cls: "vault-backup-diff-legend-item" });
+    legAdd.createSpan({ cls: "vault-backup-diff-swatch vault-backup-diff-add" });
+    legAdd.createSpan({ text: "Solo en el vault (falta en la copia)" });
+
     const wrap = body.createDiv({ cls: "vault-backup-diff-split-wrap" });
     const table = wrap.createEl("table", { cls: "vault-backup-diff-split" });
 
@@ -1453,15 +1469,29 @@ class DiffModal extends obsidian.Modal {
 
     const thead = table.createEl("thead");
     const htr = thead.createEl("tr");
-    htr.createEl("th", {
-      cls: "vault-backup-diff-th",
-      text: "Copia de seguridad",
+    const thLeft = htr.createEl("th", {
+      cls: "vault-backup-diff-th vault-backup-diff-th-real",
       attr: { colspan: "2" },
     });
-    htr.createEl("th", {
-      cls: "vault-backup-diff-th",
-      text: "Vault (origen)",
+    thLeft.createDiv({
+      cls: "vault-backup-diff-th-title",
+      text: "LO REAL · La copia de seguridad",
+    });
+    thLeft.createDiv({
+      cls: "vault-backup-diff-th-sub",
+      text: "Lo que hay ahora en el backup · " + copySize,
+    });
+    const thRight = htr.createEl("th", {
+      cls: "vault-backup-diff-th vault-backup-diff-th-orig",
       attr: { colspan: "2" },
+    });
+    thRight.createDiv({
+      cls: "vault-backup-diff-th-title",
+      text: "LO ESPERADO · El vault (original)",
+    });
+    thRight.createDiv({
+      cls: "vault-backup-diff-th-sub",
+      text: "Lo que deberia estar copiado · " + srcSize,
     });
 
     const tbody = table.createEl("tbody");
@@ -1475,16 +1505,19 @@ class DiffModal extends obsidian.Modal {
         });
         continue;
       }
-      this.renderCell(tr, row.left);
-      this.renderCell(tr, row.right);
+      this.renderCell(tr, row.left, true);
+      this.renderCell(tr, row.right, false);
     }
   }
 
   // Pinta el par de celdas (numero de linea + codigo) de un lado; null = hueco.
-  renderCell(tr, side) {
+  // isLeft marca la columna de la copia; el lado derecho (vault) lleva un
+  // separador grueso para diferenciar visualmente los dos paneles.
+  renderCell(tr, side, isLeft) {
+    const sep = isLeft ? "" : " vault-backup-diff-sep";
     if (!side) {
       tr.createEl("td", {
-        cls: "vault-backup-diff-num vault-backup-diff-empty",
+        cls: "vault-backup-diff-num vault-backup-diff-empty" + sep,
       });
       tr.createEl("td", { cls: "vault-backup-diff-code vault-backup-diff-empty" });
       return;
@@ -1496,7 +1529,7 @@ class DiffModal extends obsidian.Modal {
           ? "vault-backup-diff-add"
           : "vault-backup-diff-ctx";
     tr.createEl("td", {
-      cls: `vault-backup-diff-num ${kind}`,
+      cls: `vault-backup-diff-num ${kind}${sep}`,
       text: String(side.num),
     });
     tr.createEl("td", { cls: `vault-backup-diff-code ${kind}`, text: side.text });

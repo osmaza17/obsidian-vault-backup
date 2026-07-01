@@ -39,10 +39,14 @@ equivale a copiar la carpeta del vault desde el explorador y pegarla en otra rut
   afectados **agrupada por tipo** (los que faltan y los de distinto tamano), con
   los tamanos en el vault y en la copia, una explicacion de que significa y que
   hacer. Ademas, cada archivo de la lista tiene un boton **"Ver diff"** que abre
-  **una segunda ventana** (por encima de la anterior) con una comparacion **estilo
-  GitHub en dos columnas**: a la izquierda la version de la copia y a la derecha la
-  del vault, alineadas linea a linea (anadidas en verde, quitadas en rojo). Para
-  los archivos que faltan en la copia se muestra su contenido como "anadido". Los
+  **una segunda ventana grande** (casi a pantalla completa, por encima de la
+  anterior) con una comparacion **estilo GitHub en dos paneles claramente
+  separados**: a la **izquierda** la copia de seguridad (**"LO REAL"**, con barra
+  roja) y a la **derecha** el vault (**"LO ESPERADO", el original**, con barra
+  verde), cada panel con su tamano y alineados linea a linea (anadidas en verde,
+  quitadas en rojo). Arriba hay una barra con la ruta del archivo y la leyenda de
+  colores, y un separador central marca la division entre los dos lados. Para los
+  archivos que faltan en la copia se muestra su contenido como "anadido". Los
   archivos binarios (imagenes, PDFs, adjuntos) y los muy grandes no se difean: en
   su lugar se indica el tamano de cada version.
 - Cada carpeta de destino tiene su **propia copia automatica**: puedes activarla de
